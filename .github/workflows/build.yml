@@ -25,10 +25,25 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
+
+      - name: Cache Chocolatey packages
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\AppData\Local\Temp\chocolatey
+          key: choco-tesseract-${{ runner.os }}
 
       - name: Install Tesseract-OCR
         shell: cmd
         run: choco install tesseract --yes --no-progress
+
+      - name: Cache pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-${{ runner.os }}-py311-${{ hashFiles('**/requirements*.txt') }}-v1
+          restore-keys: |
+            pip-${{ runner.os }}-py311-
 
       - name: Install Python dependencies
         run: pip install --upgrade pyinstaller PyQt6 pynput Pillow pytesseract
