@@ -12,7 +12,7 @@ _TESS_SEARCH = [
     r'C:\Program Files\Tesseract-OCR',
     r'C:\Program Files (x86)\Tesseract-OCR',
     r'C:\Tesseract-OCR',
-    str(Path(__file__).parent / 'vendor' / 'tesseract'),   # local vendor folder
+    str(Path(SPECPATH) / 'vendor' / 'tesseract'),   # local vendor folder
 ]
 # Also check PATH
 _tess_on_path = shutil.which('tesseract')
