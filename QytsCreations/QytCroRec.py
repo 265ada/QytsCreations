@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.31"
+__version__ = "1.32"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -1133,6 +1133,62 @@ def _inject_hook(pid: int, timeout: float = 4.0, force_reload: bool = False) -> 
                    f"as {arch} — try the other build if this is wrong.")
 
 
+# ── Per-PID shared pipe pool ─────────────────────────────────────────────────
+# When multiple lanes target the same process (same PID) in parallel, they all
+# share ONE pipe connection.  The hook DLL inside the game only creates one
+# server instance, so a second simultaneous open() fails with Errno 22.
+# Solution: keep one open handle per PID plus a write-lock; refcount so we
+# close only when the last lane finishes.
+_PIPE_POOL:      dict = {}          # pid → {"pipe": file, "lock": Lock, "refs": int}
+_PIPE_POOL_LOCK: threading.Lock = threading.Lock()
+
+def _pipe_pool_acquire(pid: int) -> tuple:
+    """
+    Return (pipe_file, write_lock) for pid, opening the pipe if needed.
+    Increments refcount.  Thread-safe.
+    """
+    with _PIPE_POOL_LOCK:
+        if pid in _PIPE_POOL:
+            entry = _PIPE_POOL[pid]
+            entry["refs"] += 1
+            return entry["pipe"], entry["lock"]
+        # Not in pool — open a fresh connection (with retry/backoff)
+        pipe_name = f"{HOOK_PIPE_PREFIX}_{pid}"
+        last_err  = None
+        pipe_file = None
+        for delay in (0, 0.05, 0.1, 0.2, 0.4, 0.8):
+            if delay: time.sleep(delay)
+            try:
+                pipe_file = open(pipe_name, "wb", buffering=0)
+                break
+            except FileNotFoundError as e:
+                last_err = e
+            except Exception as e:
+                last_err = e; break
+        if pipe_file is None:
+            raise RuntimeError(f"Cannot open hook pipe {pipe_name}: {last_err}")
+        entry = {"pipe": pipe_file, "lock": threading.Lock(), "refs": 1}
+        _PIPE_POOL[pid] = entry
+        return entry["pipe"], entry["lock"]
+
+def _pipe_pool_release(pid: int):
+    """Decrement refcount; close and remove entry when last user done."""
+    with _PIPE_POOL_LOCK:
+        entry = _PIPE_POOL.get(pid)
+        if entry is None:
+            return
+        entry["refs"] -= 1
+        if entry["refs"] <= 0:
+            try:
+                p = entry["pipe"]
+                if not p.closed:
+                    p.write(b"RESET\n"); p.flush()
+                    p.close()
+            except Exception as e:
+                _log_crash(f"[detours] pool close pid={pid}: {e}")
+            del _PIPE_POOL[pid]
+
+
 class DetoursBackend(InputBackend):
     name = "detours"
 
@@ -1147,35 +1203,22 @@ class DetoursBackend(InputBackend):
             if log.exists(): log.write_text("", encoding="utf-8")
         except Exception: pass
         # ALWAYS run inject — _inject_hook handles eject-then-inject so the
-        # latest DLL build is what ends up loaded.  Skipping when the pipe
-        # already exists would leave a stale DLL in place after a rebuild.
+        # latest DLL build is what ends up loaded.
         ok, msg = _inject_hook(target_pid)
         if not ok:
             raise RuntimeError(msg)
-        pipe_name = f"{HOOK_PIPE_PREFIX}_{target_pid}"
-        # Retry-with-backoff: the server may briefly be between accepting
-        # connections (DisconnectNamedPipe → next ConnectNamedPipe race).
-        last_err = None
-        for delay in (0, 0.05, 0.1, 0.2, 0.4, 0.8):
-            if delay: time.sleep(delay)
-            try:
-                self._pipe = open(pipe_name, "wb", buffering=0)
-                return
-            except FileNotFoundError as e:
-                last_err = e
-                continue
-            except Exception as e:
-                last_err = e
-                break
-        raise RuntimeError(f"Cannot open hook pipe {pipe_name}: {last_err}")
+        self._pid  = target_pid
+        # Acquire shared pipe handle for this PID (opens once, shared across lanes)
+        self._pipe, self._pipe_lock = _pipe_pool_acquire(target_pid)
 
     def _send(self, line: str):
-        # _broken flag: once a write fails (pipe died / game closed), don't
-        # keep trying — that's how we used to crash on Stop.
+        # _broken flag: once a write fails (pipe died / game closed), stop trying.
         if getattr(self, "_broken", False): return
         try:
-            self._pipe.write((line + "\n").encode("ascii", "ignore"))
-            self._pipe.flush()
+            data = (line + "\n").encode("ascii", "ignore")
+            with self._pipe_lock:
+                self._pipe.write(data)
+                self._pipe.flush()
         except Exception as e:
             self._broken = True
             _log_crash(f"[detours] write failed: {e}")
@@ -1189,8 +1232,6 @@ class DetoursBackend(InputBackend):
         if vk: self._send(f"KU {vk}")
 
     def mouse_move(self, sx, sy):
-        # The hook DLL receives coords in whatever space the host sends.
-        # PlayerThread already converted client→screen for us.
         self._send(f"MA {int(sx)} {int(sy)}")
 
     def mouse_button(self, sx, sy, button_str, pressed):
@@ -1203,22 +1244,10 @@ class DetoursBackend(InputBackend):
         self._send(f"MW {int(dx)} {int(dy)}")
 
     def close(self):
-        # First send RESET so the DLL releases all virtual keys / buttons —
-        # otherwise a half-played macro can leave keys held in the game.
-        try:
-            if self._pipe and not getattr(self, "_broken", False):
-                self._pipe.write(b"RESET\n")
-                self._pipe.flush()
-        except Exception as e:
-            _log_crash(f"[detours] RESET on close failed: {e}")
-        # Then close the file handle.  Guard against double-close.
-        try:
-            if self._pipe and not self._pipe.closed:
-                self._pipe.close()
-        except Exception as e:
-            _log_crash(f"[detours] close failed: {e}")
-        finally:
-            self._pipe = None
+        # Release our ref from the shared pool — pool sends RESET + closes
+        # the handle only when the last lane finishes.
+        _pipe_pool_release(self._pid)
+        self._pipe = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2263,20 +2292,20 @@ QPushButton#btn_play:disabled {
     border: 1px solid rgba(200,150,0,0.22);
 }
 
-/* ── STOP button — vivid orange, always visible ──────────────────────────── */
+/* ── STOP button — bright red, always visible ────────────────────────────── */
 QPushButton#btn_stop {
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-        stop:0 #ffaa44, stop:1 #e07010);
-    color: #1a0a00; border: 2px solid #ffc060;
+        stop:0 #ff4444, stop:1 #cc0000);
+    color: #ffffff; border: 2px solid #ff6666;
     border-radius: 7px; font-weight: bold; font-size: 13px;
     padding: 7px 18px;
 }
 QPushButton#btn_stop:hover  { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-    stop:0 #ffc060, stop:1 #f08020); border-color: #ffe090; }
-QPushButton#btn_stop:pressed { background: #a05010; }
+    stop:0 #ff6666, stop:1 #dd1111); border-color: #ff9999; }
+QPushButton#btn_stop:pressed { background: #880000; }
 QPushButton#btn_stop:disabled {
-    background: rgba(200,100,20,0.25); color: rgba(255,180,80,0.42);
-    border: 1px solid rgba(220,120,30,0.22);
+    background: rgba(200,30,30,0.22); color: rgba(255,120,120,0.40);
+    border: 1px solid rgba(220,50,50,0.20);
 }
 
 QPushButton#btn_del { color: #f38ba8; }
