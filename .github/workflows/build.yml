@@ -1,0 +1,66 @@
+name: Build & Release
+
+on:
+  push:
+    paths:
+      - 'QytsCreations/QytCroRec.py'
+      - 'QytsCreations/QytCroRec.spec'
+      - 'QytsCreations/requirements.txt'
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: QytsCreations
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Extract version
+        id: version
+        shell: python
+        run: |
+          import json, os
+          with open("version.json") as f:
+              v = json.load(f)["version"]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"version={v}\n")
+
+      - name: Build exe
+        run: pyinstaller QytCroRec.spec --noconfirm
+
+      - name: Read release notes
+        id: notes
+        shell: python
+        run: |
+          import json, os
+          with open("version.json") as f:
+              notes = json.load(f).get("notes", "")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"notes={notes}\n")
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: QytCroRec v${{ steps.version.outputs.version }}
+          body: ${{ steps.notes.outputs.notes }}
+          files: QytsCreations/dist/QytCroRec.exe
+          prerelease: true
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
