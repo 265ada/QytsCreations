@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.30"
+__version__ = "1.31"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -1159,7 +1159,7 @@ class DetoursBackend(InputBackend):
         for delay in (0, 0.05, 0.1, 0.2, 0.4, 0.8):
             if delay: time.sleep(delay)
             try:
-                self._pipe = open(pipe_name, "w+b", buffering=0)
+                self._pipe = open(pipe_name, "wb", buffering=0)
                 return
             except FileNotFoundError as e:
                 last_err = e
@@ -1707,9 +1707,10 @@ def _sleep_until(target: float, stop: threading.Event):
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CHAIN PLAYER THREAD
-#   Runs all enabled lanes of a MacroGroup in sequence.
-#   Lane 0 (Primary) controls the repeat count.  Secondary lanes run once per
-#   Primary repeat.  Stop propagates to the currently running lane.
+#   Runs all enabled lanes of a MacroGroup in PARALLEL (simultaneously).
+#   Lane 0 (Primary) controls the repeat count.  All active lanes start at
+#   the same time each rep; the rep completes when ALL lanes finish.
+#   Stop propagates to every running lane via a shared threading.Event.
 # ══════════════════════════════════════════════════════════════════════════════
 
 class ChainPlayerThread(QThread):
@@ -1762,27 +1763,38 @@ class ChainPlayerThread(QThread):
         for rep in range(reps):
             if self._stop.is_set():
                 break
-            for lane_idx, lane in enumerate(g.lanes):
-                if self._stop.is_set():
-                    break
-                # Lane 0 always runs; others only if enabled and have events
-                if lane_idx > 0 and (not lane.lane_enabled or not lane.events):
-                    continue
 
+            # Collect lanes that should fire this rep
+            active = [
+                (lane_idx, lane)
+                for lane_idx, lane in enumerate(g.lanes)
+                if lane_idx == 0 or (lane.lane_enabled and lane.events)
+            ]
+
+            rep_label = f"rep {rep+1}/{reps if primary.repeat_count else '∞'}"
+
+            # ── Fire ALL active lanes simultaneously ──────────────────────────
+            def _run_lane_worker(lane_idx, lane):
                 self.lane_started.emit(g.id, lane_idx, lane.id)
                 self.log_sig.emit(
-                    f"[{g.name}] Lane {lane_idx} '{lane.name}' starting "
-                    f"(rep {rep+1}/{reps if primary.repeat_count else '∞'})")
-
+                    f"[{g.name}] Lane {lane_idx} '{lane.name}' starting ({rep_label})")
                 ok = self._run_one_lane(lane_idx, lane, all_macros)
-
                 self.lane_stopped.emit(g.id, lane_idx, lane.id)
-                if not ok:
+                if ok:
+                    self.log_sig.emit(
+                        f"[{g.name}] Lane {lane_idx} '{lane.name}' complete.")
+                else:
                     self.log_sig.emit(
                         f"[{g.name}] Lane {lane_idx} '{lane.name}' stopped early.")
-                    break   # stop remaining lanes in this rep if primary aborted
-                self.log_sig.emit(
-                    f"[{g.name}] Lane {lane_idx} '{lane.name}' complete.")
+
+            threads = [
+                threading.Thread(target=_run_lane_worker, args=(li, ln), daemon=True)
+                for li, ln in active
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
 
             if self._stop.is_set():
                 break
@@ -2728,7 +2740,7 @@ class LaneWidget(QWidget):
             self._enable_chk = QCheckBox("Enabled")
             self._enable_chk.setChecked(self._macro.lane_enabled)
             self._enable_chk.setToolTip(
-                "When checked this lane runs after the previous lane completes.")
+                "When checked this lane fires simultaneously with all other enabled lanes.")
             self._enable_chk.stateChanged.connect(self._on_enabled_changed)
             hdr_lay.addWidget(self._enable_chk)
         else:
@@ -5057,6 +5069,15 @@ class MainWindow(QMainWindow):
             lw._fill_table()
             n = len(lw.macro.events)
             self._set_status(f"Rec done — {n} events in '{lw.macro.name}'", "#a6adc8")
+            # Auto-enable secondary lane once it has recorded events so it
+            # participates in the parallel chain without the user needing to
+            # manually tick the "Enabled" checkbox.
+            if not lw._is_primary and n > 0 and not lw.macro.lane_enabled:
+                lw.macro.lane_enabled = True
+                if hasattr(lw, "_enable_chk"):
+                    lw._enable_chk.blockSignals(True)
+                    lw._enable_chk.setChecked(True)
+                    lw._enable_chk.blockSignals(False)
         self._recording_lane = None
         sound_record_stop()
         self._storage.save_groups(self._groups)

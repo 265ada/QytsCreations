@@ -1,4 +1,4 @@
 {
-  "version": "1.30",
-  "notes": "v1.30: Fix auto-update relaunch — app now correctly reopens after update. Versioned exe named QytCroRec_v{version}.exe. Fix AttributeError in restart (save_groups). Pass version tag to download so temp file is named correctly."
+  "version": "1.31",
+  "notes": "v1.31: Parallel lane playback — all lanes fire simultaneously instead of sequentially. Fix detours pipe error (Errno 22, was opening named pipe in read+write mode). Auto-enable secondary lanes after recording."
 }
