@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.29"
+__version__ = "1.30"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -1994,9 +1994,12 @@ class AutoUpdater:
             return {"version": remote, "notes": info.get("notes", "")}
         return None
 
-    def download_and_install(self, target_path: Path, timeout: float = 60.0) -> bool:
+    def download_and_install(self, target_path: Path,
+                             timeout: float = 60.0,
+                             new_version: str = "") -> bool:
         """Download update and swap in.  Returns True on success.
-        Exe mode: downloads new exe to a temp path + writes a batch swap script.
+        Exe mode: downloads new exe, writes a batch swap script that
+        overwrites the current exe and relaunches it.
         Script mode: classic .new.py swap.
         """
         if getattr(sys, "frozen", False):
@@ -2005,25 +2008,28 @@ class AutoUpdater:
                 print("No EXE update URL configured.")
                 return False
             current_exe = Path(sys.executable)
-            new_exe     = current_exe.with_name("QytCroRec_update.exe")
-            batch_path  = current_exe.with_name("_qyt_update.bat")
+            # Name the temp download after the new version, not "_update"
+            ver_tag  = new_version.strip() or "new"
+            new_exe  = current_exe.with_name(f"QytCroRec_v{ver_tag}.exe")
+            batch_path = current_exe.with_name("_qyt_update.bat")
             try:
                 with urllib.request.urlopen(self.exe_url, timeout=timeout) as r:
                     data = r.read()
             except Exception as e:
                 print(f"Exe update download failed: {e}")
                 return False
-            if len(data) < 1024 * 100:   # < 100 KB — almost certainly wrong
-                print("Exe update sanity check failed (too small).")
+            if len(data) < 1024 * 50:   # < 50 KB — almost certainly wrong
+                print(f"Exe update sanity check failed (size={len(data)}).")
                 return False
             new_exe.write_bytes(data)
-            # Batch script: wait, swap, relaunch, self-delete
+            # Batch: wait for process exit, overwrite exe, relaunch, self-delete
+            # Use CALL + full-quoted path so spaces in directory work correctly.
             batch_path.write_text(
                 "@echo off\r\n"
-                "timeout /t 2 /nobreak >nul\r\n"
+                "ping -n 3 127.0.0.1 >nul\r\n"          # ~2 s wait (reliable cross-OS)
                 f"move /y \"{new_exe}\" \"{current_exe}\"\r\n"
-                f"start \"\" \"{current_exe}\"\r\n"
-                f"del /q \"{batch_path}\"\r\n",
+                f"start \"QytCroRec\" \"{current_exe}\"\r\n"
+                f"(goto) 2>nul & del /f /q \"%~f0\"\r\n",  # self-delete
                 encoding="ascii"
             )
             subprocess.Popen(
@@ -2031,7 +2037,7 @@ class AutoUpdater:
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
                 close_fds=True,
             )
-            return True   # caller should quit after this
+            return True   # caller must quit so batch can overwrite the exe
         else:
             # ── SCRIPT MODE ──────────────────────────────────────────────────
             try:
@@ -4027,7 +4033,7 @@ class MainWindow(QMainWindow):
         # Run download off the GUI thread so UI doesn't freeze
         def _do_download():
             target = Path(__file__).resolve()
-            ok = upd.download_and_install(target)
+            ok = upd.download_and_install(target, new_version=info["version"])
             self._update_done_sig.emit(ok)   # signal marshals to GUI thread safely
         threading.Thread(target=_do_download, daemon=True).start()
 
@@ -4042,7 +4048,7 @@ class MainWindow(QMainWindow):
 
     def _restart_app(self):
         """Relaunch and quit this instance.  Handles both exe and script mode."""
-        self._storage.save_macros(self._macros)
+        self._storage.save_groups(self._groups)
         if getattr(sys, "frozen", False):
             # Exe mode: batch swap script already launched by AutoUpdater —
             # just quit so the batch can overwrite the exe while it's not running.

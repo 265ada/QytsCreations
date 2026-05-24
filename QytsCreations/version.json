@@ -1,4 +1,4 @@
 {
-  "version": "1.29",
-  "notes": "v1.26: Full event editor — add/edit/duplicate/reorder/scale events directly in the Events tab. Insert keyboard, mouse click/move/scroll, and delay events. Key capture button. Delay column shows ms gap per event (double-click to edit inline). Right-click context menu. Marvel background, glass UI, vivid Record/Play/Stop buttons. CI build caching for faster builds."
+  "version": "1.30",
+  "notes": "v1.30: Fix auto-update relaunch — app now correctly reopens after update. Versioned exe named QytCroRec_v{version}.exe. Fix AttributeError in restart (save_groups). Pass version tag to download so temp file is named correctly."
 }
