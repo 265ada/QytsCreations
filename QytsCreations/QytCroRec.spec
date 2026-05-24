@@ -56,12 +56,20 @@ _hook_files = [
 ]
 _hook_datas = [(src, dst) for src, dst in _hook_files if Path(src).exists()]
 
+# ── Bundle assets folder (backgrounds, icons, etc.) ──────────────────────────
+_assets_datas = []
+_assets_dir = Path(SPECPATH) / 'assets'
+if _assets_dir.exists():
+    for _f in _assets_dir.iterdir():
+        if _f.is_file():
+            _assets_datas.append((str(_f), 'assets'))
+
 # ── Analysis ──────────────────────────────────────────────────────────────────
 a = Analysis(
     ['QytCroRec.py'],
     pathex=[],
     binaries=_tess_binaries,
-    datas=_hook_datas + _tess_datas,
+    datas=_hook_datas + _tess_datas + _assets_datas,
     hiddenimports=[
         # Pillow — PIL sub-modules PyInstaller may miss
         'PIL', 'PIL.Image', 'PIL.ImageGrab', 'PIL.ImageFilter',
