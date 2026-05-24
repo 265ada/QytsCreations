@@ -2960,3 +2960,4 @@ if __name__ == "__main__":
 #   • Update checks run on a background thread; if the URL is unreachable
 #     they silently fail.  Startup never blocks waiting on the network.
 # ══════════════════════════════════════════════════════════════════════════════
+
