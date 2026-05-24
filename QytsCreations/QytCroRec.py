@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.28"
+__version__ = "1.29"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2229,20 +2229,20 @@ QPushButton#btn_record:disabled {
     border: 1px solid rgba(200,60,90,0.25);
 }
 
-/* ── PLAY button — vivid yellow, always visible ──────────────────────────── */
+/* ── PLAY button — gold background, white text, always legible ───────────── */
 QPushButton#btn_play {
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-        stop:0 #ffe44d, stop:1 #e6a800);
-    color: #1a1000; border: 2px solid #ffe97a;
-    border-radius: 7px; font-weight: bold; font-size: 13px;
-    padding: 7px 18px;
+        stop:0 #f5c400, stop:1 #c98e00);
+    color: #ffffff; border: 2px solid #ffd740;
+    border-radius: 7px; font-weight: bold; font-size: 14px;
+    padding: 7px 18px; letter-spacing: 0.5px;
 }
 QPushButton#btn_play:hover  { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-    stop:0 #fff07a, stop:1 #f0b800); border-color: #fff5aa; }
-QPushButton#btn_play:pressed { background: #b87d00; }
+    stop:0 #ffd740, stop:1 #e0a000); border-color: #ffe880; color: #ffffff; }
+QPushButton#btn_play:pressed { background: #a07000; color: #ffffff; }
 QPushButton#btn_play:disabled {
-    background: rgba(200,150,0,0.22); color: rgba(255,220,80,0.40);
-    border: 1px solid rgba(220,170,0,0.20);
+    background: rgba(180,120,0,0.28); color: rgba(255,220,100,0.45);
+    border: 1px solid rgba(200,150,0,0.22);
 }
 
 /* ── STOP button — vivid orange, always visible ──────────────────────────── */
@@ -2616,6 +2616,7 @@ class LaneWidget(QWidget):
     play_req      = pyqtSignal(str)   # macro id
     stop_req      = pyqtSignal(str)   # macro id
     window_picked = pyqtSignal(str, int, str)  # macro_id, slot, title
+    _drag_result  = pyqtSignal(str)   # picked window title (thread-safe GUI marshal)
 
     def __init__(self, macro: Macro, lane_index: int,
                  all_macros_fn,        # callable → list[Macro]
@@ -3676,50 +3677,111 @@ class LaneWidget(QWidget):
             self.changed.emit(self._macro.id)
 
     def _start_drag_pick(self, slot: int):
+        """
+        Click-to-pick: minimise app, show floating hint, capture next left-click
+        via pynput, walk to root HWND with GetAncestor(GA_ROOT), emit signal
+        to marshal the result back to the GUI thread.
+        """
         parent_win = self.window()
-        parent_win.showMinimized()
+
+        # Create hint BEFORE minimising so it can float independently
         from PyQt6.QtWidgets import QDialog, QVBoxLayout
-        hint = QDialog(parent_win)
+        hint = QDialog()   # no parent — floats freely even if app is minimised
         hint.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
-        lbl = QLabel(f"  🎯  Click any window to set as target for lane '{self._macro.name}'.\n  ESC to cancel.  ")
+            Qt.WindowType.FramelessWindowHint  |
+            Qt.WindowType.Tool)
+        hint.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        lbl = QLabel(
+            f"  🎯  Click any window to set as target\n"
+            f"  for lane: '{self._macro.name}'\n\n"
+            f"  Left-click to select   ·   ESC to cancel  ")
         lbl.setStyleSheet(
-            "background:#313244;color:#cdd6f4;font-size:14px;padding:18px;"
-            "border:2px solid #89b4fa;border-radius:8px;")
+            "background: rgba(20,20,40,0.96); color: #cdd6f4;"
+            "font-size: 14px; font-weight: bold; padding: 20px;"
+            "border: 2px solid #89b4fa; border-radius: 10px;")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         QVBoxLayout(hint).addWidget(lbl)
-        hint.adjustSize(); hint.move(100, 100); hint.show()
+        hint.adjustSize()
+        # Place hint at top-centre of primary screen
+        from PyQt6.QtWidgets import QApplication as _QApp
+        screen = _QApp.primaryScreen().geometry()
+        hint.move(screen.center().x() - hint.width() // 2, 60)
+        hint.show()
+        hint.raise_()
+
+        parent_win.showMinimized()
+
         result: list = [None]
-        def _on_click(x, y, button, pressed):
-            if not pressed or button != ms_lib.Button.left: return
-            hwnd = _u32.WindowFromPoint(ctypes.wintypes.POINT(int(x), int(y)))
+        _stopped = threading.Event()
+
+        def _get_root_hwnd(x, y) -> int:
+            """Get the true top-level root window at screen coordinates."""
+            pt = ctypes.wintypes.POINT(int(x), int(y))
+            hwnd = _u32.WindowFromPoint(pt)
+            if not hwnd:
+                return 0
+            # GetAncestor with GA_ROOT (2) walks to the real top-level window
+            # (skips MDI children, pop-ups parented to the game, etc.)
+            GA_ROOT = 2
+            try:
+                root = ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT)
+                if root: return root
+            except Exception: pass
+            # Fallback: manual GetParent loop
             while True:
                 p = _u32.GetParent(hwnd)
                 if not p: break
                 hwnd = p
-            n = _u32.GetWindowTextLengthW(hwnd)
-            if n:
-                buf = ctypes.create_unicode_buffer(n+1)
-                _u32.GetWindowTextW(hwnd, buf, n+1)
-                result[0] = buf.value
-            ml.stop(); return False
+            return hwnd
+
+        def _on_click(x, y, button, pressed):
+            if _stopped.is_set(): return False
+            if not pressed or button != ms_lib.Button.left: return
+            hwnd = _get_root_hwnd(x, y)
+            if hwnd:
+                buf_len = _u32.GetWindowTextLengthW(hwnd)
+                if buf_len:
+                    buf = ctypes.create_unicode_buffer(buf_len + 1)
+                    _u32.GetWindowTextW(hwnd, buf, buf_len + 1)
+                    title = buf.value.strip()
+                    if title:
+                        result[0] = title
+            _stopped.set()
+            ml.stop()
+            return False   # stop listener
+
         def _on_key(key):
-            if key == Key.esc: ml.stop()
+            if _stopped.is_set(): return False
+            if key == Key.esc:
+                _stopped.set(); ml.stop()
             return False
-        ml = ms_lib.Listener(on_click=_on_click)
-        kl = kb_lib.Listener(on_press=_on_key)
-        def _wait():
-            ml.join(); kl.stop(); QTimer.singleShot(0, _done)
-        def _done():
+
+        # Wire the signal ONCE — it marshals result to GUI thread safely
+        def _on_drag_result(title: str):
+            self._drag_result.disconnect(_on_drag_result)
             hint.close()
-            parent_win.showNormal(); parent_win.raise_(); parent_win.activateWindow()
-            if result[0]:
-                self._macro.target_window_title = result[0]
-                self._win_lbl.setText(result[0])
+            parent_win.showNormal()
+            parent_win.raise_()
+            parent_win.activateWindow()
+            if title:
+                self._macro.target_window_title = title
+                self._win_lbl.setText(title)
                 self._refresh_pid_label()
                 self.changed.emit(self._macro.id)
+
+        self._drag_result.connect(_on_drag_result)
+
+        ml = ms_lib.Listener(on_click=_on_click)
+        kl = kb_lib.Listener(on_press=_on_key)
         ml.start(); kl.start()
+
+        def _wait():
+            ml.join()
+            kl.stop()
+            # Emit signal — thread-safe, marshals to GUI event loop
+            self._drag_result.emit(result[0] or "")
+
         threading.Thread(target=_wait, daemon=True).start()
 
     # ── Guard handlers ────────────────────────────────────────────────────────
