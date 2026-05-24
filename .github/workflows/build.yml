@@ -9,6 +9,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -24,6 +27,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: QytsCreations/requirements.txt
+
+      - name: Cache PyInstaller bootloader
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pyinstaller
+          key: pyinstaller-${{ runner.os }}-py3.11
 
       - name: Install dependencies
         run: |
@@ -62,5 +73,3 @@ jobs:
           files: QytsCreations/dist/QytCroRec.exe
           prerelease: true
           make_latest: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
