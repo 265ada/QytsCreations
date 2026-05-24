@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller artifacts
+build/
+dist/
+*.spec
+
+# C++ build artifacts (commit only the source + scripts)
+hooks/dinput_hook/*.obj
+hooks/dinput_hook/*.exp
+hooks/dinput_hook/*.lib
+hooks/dinput_hook/*.lock
+hooks/dinput_hook/*.old*
+
+# Backups + crash dumps + per-user macro data
+*.bak
+*.bak.json
+*.prev.py
+.macro_recorder/
+crash.log
+dll_hook.log
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+
+# OS noise
+Thumbs.db
+Desktop.ini
