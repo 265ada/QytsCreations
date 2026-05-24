@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.21"
+__version__ = "1.22"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -64,6 +64,19 @@ from PyQt6.QtGui import (
 from pynput import keyboard as kb_lib, mouse as ms_lib
 from pynput.keyboard import Key, KeyCode
 from pynput.mouse import Button
+
+# ── Optional OCR for Pixel Bot Guard ─────────────────────────────────────────
+try:
+    from PIL import Image as _Image, ImageGrab as _ImageGrab, ImageFilter as _ImageFilter
+    _PILLOW_OK = True
+except ImportError:
+    _PILLOW_OK = False
+
+try:
+    import pytesseract as _pytesseract
+    _TESSERACT_OK = True
+except ImportError:
+    _TESSERACT_OK = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -127,6 +140,15 @@ class Macro:
     input_backend:       str   = "auto"    # "auto" | "winmsg" | "pynput" | "interception" | "serial_hid"
     created_at:          float = field(default_factory=time.time)
     run_count:           int   = 0
+    # Pixel Bot Guard settings
+    pixel_guard_enabled:           bool  = False
+    pixel_guard_red_flags:         list  = field(default_factory=list)
+    pixel_guard_correction_key:    str   = "b"
+    pixel_guard_correction_macro:  str   = ""   # macro id, or "" = use key
+    pixel_guard_cap_x_pct:         float = 0.75
+    pixel_guard_cap_y_pct:         float = 0.02
+    pixel_guard_cap_w_pct:         float = 0.24
+    pixel_guard_cap_h_pct:         float = 0.06
 
     def clone(self) -> "Macro":
         m = copy.deepcopy(self)
@@ -1309,23 +1331,71 @@ class RecorderThread(QThread):
 # PLAYER THREAD
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PIXEL BOT GUARD — screen OCR helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _pixel_ocr_region(hwnd: Optional[int],
+                      cap_x_pct: float, cap_y_pct: float,
+                      cap_w_pct: float, cap_h_pct: float) -> str:
+    """
+    Capture the configured sub-region of hwnd (or foreground window if None)
+    and return pytesseract OCR text.  Returns '' on any failure.
+    """
+    if not _PILLOW_OK or not _TESSERACT_OK:
+        return ""
+    try:
+        if not hwnd:
+            hwnd = _u32.GetForegroundWindow()
+        rect = ctypes.wintypes.RECT()
+        _u32.GetWindowRect(hwnd, ctypes.byref(rect))
+        wx, wy = rect.left, rect.top
+        ww = max(rect.right  - rect.left, 1)
+        wh = max(rect.bottom - rect.top,  1)
+        x1 = wx + int(ww * cap_x_pct)
+        y1 = wy + int(wh * cap_y_pct)
+        x2 = x1 + max(int(ww * cap_w_pct), 4)
+        y2 = y1 + max(int(wh * cap_h_pct), 4)
+        img = _ImageGrab.grab(bbox=(x1, y1, x2, y2))
+        # Scale 3× for better OCR accuracy on small HUD text
+        img = img.resize((img.width * 3, img.height * 3), _Image.LANCZOS)
+        img = img.convert("L")  # grayscale
+        img = img.filter(_ImageFilter.SHARPEN)
+        text = _pytesseract.image_to_string(img, config="--psm 7 --oem 3").strip()
+        return text
+    except Exception as e:
+        _log_crash(f"[pixel_guard] OCR error: {e}")
+        return ""
+
+
+def _pixel_flags_match(text: str, red_flags: list) -> Optional[str]:
+    """Return the matched red-flag string, or None if no match."""
+    tl = text.lower()
+    for flag in red_flags:
+        f = flag.strip()
+        if f and f.lower() in tl:
+            return f
+    return None
+
+
 class PlayerThread(QThread):
     started_sig  = pyqtSignal(str)
     stopped_sig  = pyqtSignal(str)
     progress_sig = pyqtSignal(str, int, int)
     # mode signal payload is the backend name actually used (e.g. "winmsg")
     mode_sig     = pyqtSignal(str, str)
+    # Pixel Guard matched — carries (macro_id, matched_flag_text)
+    guard_sig    = pyqtSignal(str, str)
 
-    def __init__(self, macro: Macro):
+    def __init__(self, macro: Macro, all_macros: Optional[list] = None):
         super().__init__()
-        self.macro = macro
-        self._stop = threading.Event()
+        self.macro      = macro
+        self.all_macros = all_macros or []
+        self._stop      = threading.Event()
 
     def stop(self): self._stop.set()
 
     def run(self):
-        # Outer try so any unexpected exception in playback logs + cleans up
-        # instead of crashing the whole interpreter.
         try:
             self._run_inner()
         except Exception as e:
@@ -1340,17 +1410,12 @@ class PlayerThread(QThread):
         self.started_sig.emit(m.id)
 
         backend = create_backend(m)
-        # Tell the UI which backend we actually got.  If creation failed,
-        # pack the real reason after a colon so the UI can show it.
         if backend is None:
             self.mode_sig.emit(m.id, f"error:{_LAST_BACKEND_ERROR}")
             self.stopped_sig.emit(m.id)
             return
         self.mode_sig.emit(m.id, backend.name)
 
-        # Resolve a target HWND for client→screen translation of any events
-        # that were recorded in client space.  If the macro doesn't use a
-        # target window, _target_hwnd stays None and screen coords pass through.
         self._target_hwnd: Optional[int] = None
         if m.use_target_window and m.target_window_title:
             self._target_hwnd = find_window_hwnd(m.target_window_title)
@@ -1361,30 +1426,112 @@ class PlayerThread(QThread):
         reps   = m.repeat_count or 10_000_000
 
         try:
-            for _ in range(reps):
-                if self._stop.is_set(): break
+            rep = 0
+            while rep < reps and not self._stop.is_set():
                 t0 = time.perf_counter()
-                for i, ev in enumerate(events):
-                    if self._stop.is_set(): break
+                i  = 0
+                skip_initial_kb = False   # set True after a guard-triggered restart
+
+                while i < total and not self._stop.is_set():
+                    ev = events[i]
+
+                    # On restart: skip leading keyboard events until first
+                    # non-keyboard event so repeated setup presses are avoided.
+                    if skip_initial_kb:
+                        if ev["event_type"] in ("key_press", "key_release"):
+                            i += 1
+                            continue
+                        else:
+                            skip_initial_kb = False   # resume normally
+
                     _sleep_until(t0 + ev["timestamp"] / speed, self._stop)
-                    if not self._stop.is_set():
-                        self._fire(ev, backend)
-                        self.progress_sig.emit(m.id, i, total)
+                    if self._stop.is_set():
+                        break
+
+                    # ── Pixel Guard check ────────────────────────────────────
+                    if self._pixel_guard_check(ev, m, backend):
+                        # Guard triggered: restart this rep from the top
+                        i = 0
+                        skip_initial_kb = True
+                        t0 = time.perf_counter()
+                        continue
+
+                    self._fire(ev, backend)
+                    self.progress_sig.emit(m.id, i, total)
+                    i += 1
+
+                rep += 1
         finally:
             try: backend.close()
             except Exception: pass
 
         self.stopped_sig.emit(m.id)
 
+    # ── Pixel Guard ───────────────────────────────────────────────────────────
+
+    def _pixel_guard_check(self, ev: dict, m: Macro, backend: InputBackend) -> bool:
+        """
+        If this event has pixel_guard=True AND the macro has pixel_guard_enabled:
+          - OCR the configured window region
+          - If a red-flag matches: run correction, emit guard_sig, return True
+        Returns True  → caller should restart from top.
+        Returns False → proceed normally.
+        """
+        if not ev.get("pixel_guard"):
+            return False
+        if not getattr(m, "pixel_guard_enabled", False):
+            return False
+        red_flags = getattr(m, "pixel_guard_red_flags", [])
+        if not red_flags:
+            return False
+
+        text  = _pixel_ocr_region(
+            self._target_hwnd,
+            getattr(m, "pixel_guard_cap_x_pct", 0.75),
+            getattr(m, "pixel_guard_cap_y_pct", 0.02),
+            getattr(m, "pixel_guard_cap_w_pct", 0.24),
+            getattr(m, "pixel_guard_cap_h_pct", 0.06),
+        )
+        matched = _pixel_flags_match(text, red_flags)
+        if matched is None:
+            return False   # location OK — continue
+
+        # ── Red flag matched ─────────────────────────────────────────────────
+        _log_crash(f"[pixel_guard] matched '{matched}' in '{text}' — running correction")
+        self.guard_sig.emit(m.id, matched)
+
+        corr_id = getattr(m, "pixel_guard_correction_macro", "")
+        if corr_id:
+            corr = next((x for x in self.all_macros if x.id == corr_id), None)
+            if corr and corr.events:
+                self._run_inline(corr, backend)
+                return True
+
+        # Default: press & release the correction key (B by default)
+        key = getattr(m, "pixel_guard_correction_key", "b") or "b"
+        try:
+            backend.key_down(key)
+            time.sleep(0.05)
+            backend.key_up(key)
+        except Exception as e:
+            _log_crash(f"[pixel_guard] correction key press failed: {e}")
+        return True
+
+    def _run_inline(self, m: Macro, backend: InputBackend):
+        """Run a correction macro's events inline — no guard recursion, no rep loop."""
+        speed = max(0.01, m.speed_multiplier)
+        t0    = time.perf_counter()
+        for ev in m.events:
+            if self._stop.is_set(): break
+            _sleep_until(t0 + ev["timestamp"] / speed, self._stop)
+            if not self._stop.is_set():
+                self._fire(ev, backend)
+
+    # ── Coordinate + event helpers ────────────────────────────────────────────
+
     def _resolve_xy(self, d: dict) -> tuple:
-        """
-        Translate a recorded event's (x, y) to screen coordinates,
-        clamping client coords so they stay inside the target window.
-        """
         x, y = int(d["x"]), int(d["y"])
         if d.get("coord_space") == "client" and self._target_hwnd:
-            # Clamp to current client area so playback can never leak outside
-            # the target window — even if the user resized it smaller.
             cw, ch = client_rect(self._target_hwnd)
             if cw > 0 and ch > 0:
                 x = max(0, min(x, cw - 1))
@@ -1394,8 +1541,6 @@ class PlayerThread(QThread):
         return x, y
 
     def _fire(self, ev: dict, b: InputBackend):
-        # Bail fast if Stop was pressed — don't push more events into a backend
-        # we're about to close.
         if self._stop.is_set(): return
         d, t = ev["data"], ev["event_type"]
         try:
@@ -1885,6 +2030,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self._build_tab_macro(),     "⚙  Macro")
         tabs.addTab(self._build_tab_events(),    "⏺  Events")
+        tabs.addTab(self._build_tab_guard(),     "🛡  Guard")
         tabs.addTab(self._build_tab_shortcuts(), "⌨  Shortcuts")
         return tabs
 
@@ -2088,6 +2234,131 @@ class MainWindow(QMainWindow):
         lay.addStretch()
         return w
 
+    # ── Tab: Guard ────────────────────────────────────────────────────────────
+
+    def _build_tab_guard(self) -> QWidget:
+        from PyQt6.QtWidgets import QScrollArea
+        inner = QWidget()
+        lay   = QVBoxLayout(inner); lay.setContentsMargins(10, 10, 10, 10); lay.setSpacing(10)
+
+        # ── OCR availability notice ──────────────────────────────────────────
+        if not _PILLOW_OK or not _TESSERACT_OK:
+            missing = []
+            if not _PILLOW_OK:   missing.append("Pillow  (pip install Pillow)")
+            if not _TESSERACT_OK: missing.append("pytesseract  (pip install pytesseract) + Tesseract-OCR binary")
+            note = QLabel(
+                "⚠  Pixel Bot Guard requires:\n" + "\n".join(f"   • {m}" for m in missing))
+            note.setStyleSheet(
+                "color: #f38ba8; background: #2a1a1a; border: 1px solid #f38ba8; "
+                "border-radius: 5px; padding: 8px; font-size: 12px;")
+            note.setWordWrap(True)
+            lay.addWidget(note)
+
+        # ── Enable ───────────────────────────────────────────────────────────
+        grp_en = QGroupBox("Pixel Bot Guard")
+        gl_en  = QVBoxLayout(grp_en); gl_en.setSpacing(8)
+
+        r_en = QHBoxLayout()
+        self._guard_enabled_chk = QCheckBox("Enable Pixel Bot Guard for this macro")
+        self._guard_enabled_chk.setToolTip(
+            "When enabled, events with '🛡' checked will trigger an OCR read\n"
+            "of the configured screen region before executing.  If a red-flag\n"
+            "location is detected the correction runs and the macro restarts.")
+        self._guard_enabled_chk.stateChanged.connect(self._on_guard_enabled_changed)
+        r_en.addWidget(self._guard_enabled_chk); r_en.addStretch()
+        gl_en.addLayout(r_en)
+        lay.addWidget(grp_en)
+
+        # ── Red-flag locations ───────────────────────────────────────────────
+        grp_rf = QGroupBox("Red-Flag Locations")
+        gl_rf  = QVBoxLayout(grp_rf); gl_rf.setSpacing(6)
+        rf_note = QLabel(
+            "Comma-separated location names.  If the OCR text contains any of\n"
+            "these (case-insensitive), the correction triggers and the macro\n"
+            "restarts from the beginning (skipping leading keyboard events).")
+        rf_note.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        rf_note.setWordWrap(True)
+        gl_rf.addWidget(rf_note)
+        self._guard_flags_edit = QLineEdit(placeholderText="e.g.  The Raft, Danger Zone, Hostile Area")
+        self._guard_flags_edit.editingFinished.connect(self._on_guard_flags_changed)
+        gl_rf.addWidget(self._guard_flags_edit)
+        lay.addWidget(grp_rf)
+
+        # ── Capture region ───────────────────────────────────────────────────
+        grp_cap = QGroupBox("Screen Capture Region  (% of target window)")
+        gl_cap  = QVBoxLayout(grp_cap); gl_cap.setSpacing(6)
+        cap_note = QLabel(
+            "Defines the rectangle read by OCR.  Values are fractions of the\n"
+            "target window size (0.0–1.0).  Default covers top-right HUD area.")
+        cap_note.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        gl_cap.addWidget(cap_note)
+
+        cap_row = QHBoxLayout()
+        for label, attr, default in [
+            ("X offset", "_guard_cap_x", 0.75),
+            ("Y offset", "_guard_cap_y", 0.02),
+            ("Width",    "_guard_cap_w", 0.24),
+            ("Height",   "_guard_cap_h", 0.06),
+        ]:
+            cap_row.addWidget(QLabel(f"{label}:"))
+            sp = QDoubleSpinBox()
+            sp.setRange(0.0, 1.0); sp.setSingleStep(0.01); sp.setValue(default)
+            sp.setDecimals(3); sp.setMaximumWidth(90)
+            sp.valueChanged.connect(self._on_guard_cap_changed)
+            setattr(self, attr + "_spin", sp)
+            cap_row.addWidget(sp)
+            cap_row.addSpacing(8)
+
+        self._guard_test_btn = QPushButton("🔍 Test OCR")
+        self._guard_test_btn.setToolTip(
+            "Capture the region NOW and show the OCR result — useful for\n"
+            "verifying the region covers the location text.")
+        self._guard_test_btn.clicked.connect(self._test_guard_ocr)
+        cap_row.addWidget(self._guard_test_btn)
+        cap_row.addStretch()
+        gl_cap.addLayout(cap_row)
+        lay.addWidget(grp_cap)
+
+        # ── Correction ───────────────────────────────────────────────────────
+        grp_cor = QGroupBox("Correction Action  (runs when red-flag detected)")
+        gl_cor  = QVBoxLayout(grp_cor); gl_cor.setSpacing(6)
+
+        cor_row1 = QHBoxLayout()
+        cor_row1.addWidget(QLabel("Press key:"))
+        self._guard_key_edit = QLineEdit("b")
+        self._guard_key_edit.setMaximumWidth(60)
+        self._guard_key_edit.setToolTip(
+            "Single key pressed when a red-flag is detected (default: b).\n"
+            "Ignored if a Correction Macro is selected below.")
+        self._guard_key_edit.editingFinished.connect(self._on_guard_key_changed)
+        cor_row1.addWidget(self._guard_key_edit)
+        cor_row1.addSpacing(20)
+        cor_row1.addWidget(QLabel("OR  Correction Macro:"))
+        self._guard_macro_combo = QComboBox()
+        self._guard_macro_combo.setMinimumWidth(200)
+        self._guard_macro_combo.setToolTip(
+            "Run this macro's events inline instead of a single key press.\n"
+            "Leave as '(none)' to use the key press above.")
+        self._guard_macro_combo.currentIndexChanged.connect(self._on_guard_macro_changed)
+        cor_row1.addWidget(self._guard_macro_combo)
+        cor_row1.addStretch()
+        gl_cor.addLayout(cor_row1)
+
+        cor_note = QLabel(
+            "After correction: macro restarts from event 0, skipping leading\n"
+            "keyboard-only events (so initial setup keys are not repeated).")
+        cor_note.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        gl_cor.addWidget(cor_note)
+        lay.addWidget(grp_cor)
+
+        lay.addStretch()
+
+        # Wrap in a scroll area so it survives small windows
+        scroll = QScrollArea()
+        scroll.setWidget(inner); scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; }")
+        return scroll
+
     # ── Tab: Events ───────────────────────────────────────────────────────────
 
     def _build_tab_events(self) -> QWidget:
@@ -2123,11 +2394,13 @@ class MainWindow(QMainWindow):
         lay.addLayout(filt_row)
 
         self._table = QTableWidget()
-        self._table.setColumnCount(4)
-        self._table.setHorizontalHeaderLabels(["#", "Time (s)", "Type", "Details"])
+        self._table.setColumnCount(5)
+        self._table.setHorizontalHeaderLabels(["#", "Time (s)", "Type", "Details", "🛡"])
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         hh.resizeSection(0, 50); hh.resizeSection(1, 100); hh.resizeSection(2, 120)
+        hh.resizeSection(4, 34)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
@@ -2136,6 +2409,7 @@ class MainWindow(QMainWindow):
         self._table.verticalHeader().setSectionsMovable(True)
         self._table.verticalHeader().sectionMoved.connect(self._on_section_moved)
         self._table.cellClicked.connect(self._on_table_cell_clicked)
+        self._table.itemChanged.connect(self._on_guard_item_changed)
         lay.addWidget(self._table)
 
         ea = QHBoxLayout()
@@ -2326,6 +2600,18 @@ class MainWindow(QMainWindow):
     def _on_row_changed(self, row: int):
         if 0 <= row < len(self._macros): self._load_macro(self._macros[row])
 
+    def _on_guard_item_changed(self, item: "QTableWidgetItem"):
+        """Save pixel_guard flag when user checks/unchecks the 🛡 column."""
+        if item.column() != 4: return
+        if not self._current: return
+        row = item.row()
+        if row in self._groups: return   # group-header row — no event behind it
+        idx = self._row_event_idx[row] if 0 <= row < len(self._row_event_idx) else -1
+        if idx < 0 or idx >= len(self._current.events): return
+        self._current.events[idx]["pixel_guard"] = (
+            item.checkState() == Qt.CheckState.Checked)
+        self._storage.save_macros(self._macros)
+
     def _load_macro(self, m: Macro):
         self._current = m
         for w, v in [(self._name_edit, m.name), (self._hotkey_edit, m.trigger_hotkey)]:
@@ -2349,8 +2635,47 @@ class MainWindow(QMainWindow):
         self._backend_combo.blockSignals(True)
         self._backend_combo.setCurrentIndex(idx)
         self._backend_combo.blockSignals(False)
+        # ── Pixel Guard tab ──────────────────────────────────────────────────
+        self._guard_enabled_chk.blockSignals(True)
+        self._guard_enabled_chk.setChecked(getattr(m, "pixel_guard_enabled", False))
+        self._guard_enabled_chk.blockSignals(False)
+        self._guard_flags_edit.blockSignals(True)
+        self._guard_flags_edit.setText(
+            ", ".join(getattr(m, "pixel_guard_red_flags", [])))
+        self._guard_flags_edit.blockSignals(False)
+        self._guard_key_edit.blockSignals(True)
+        self._guard_key_edit.setText(getattr(m, "pixel_guard_correction_key", "b") or "b")
+        self._guard_key_edit.blockSignals(False)
+        for attr, sp_name, default in [
+            ("pixel_guard_cap_x_pct", "_guard_cap_x_spin", 0.75),
+            ("pixel_guard_cap_y_pct", "_guard_cap_y_spin", 0.02),
+            ("pixel_guard_cap_w_pct", "_guard_cap_w_spin", 0.24),
+            ("pixel_guard_cap_h_pct", "_guard_cap_h_spin", 0.06),
+        ]:
+            sp = getattr(self, sp_name)
+            sp.blockSignals(True)
+            sp.setValue(getattr(m, attr, default))
+            sp.blockSignals(False)
+        self._reload_guard_macro_combo(m)
         self._fill_table(m)
         self._update_play_btns()
+
+    def _reload_guard_macro_combo(self, m: Optional[Macro] = None):
+        """Rebuild the correction-macro dropdown from the current macros list."""
+        m = m or self._current
+        combo = self._guard_macro_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("(none — use key press)", "")
+        cur_id = getattr(m, "pixel_guard_correction_macro", "") if m else ""
+        sel = 0
+        for i2, mac in enumerate(self._macros, start=1):
+            if m and mac.id == m.id: continue   # can't use itself as correction
+            combo.addItem(mac.name, mac.id)
+            if mac.id == cur_id:
+                sel = i2
+        combo.setCurrentIndex(sel)
+        combo.blockSignals(False)
 
     GROUP_THRESHOLD = 3   # collapse consecutive same-type runs of >=N events
 
@@ -2388,6 +2713,25 @@ class MainWindow(QMainWindow):
         groups = self._build_event_groups(m.events)
         groups_by_start = {g[0]: g for g in groups}
 
+        def _guard_item(ev_dict: dict) -> QTableWidgetItem:
+            """Return a checkable 🛡 item reflecting ev_dict['pixel_guard']."""
+            it = QTableWidgetItem()
+            it.setFlags(Qt.ItemFlag.ItemIsEnabled |
+                        Qt.ItemFlag.ItemIsSelectable |
+                        Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(
+                Qt.CheckState.Checked if ev_dict.get("pixel_guard") else Qt.CheckState.Unchecked)
+            it.setToolTip("Check to run Pixel Bot OCR guard before this event")
+            return it
+
+        def _guard_header_item() -> QTableWidgetItem:
+            """Non-interactive placeholder for group-header rows."""
+            it = QTableWidgetItem("—")
+            it.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it.setForeground(QColor("#45475a"))
+            return it
+
         i = 0
         while i < len(m.events):
             if i in groups_by_start:
@@ -2406,6 +2750,7 @@ class MainWindow(QMainWindow):
                 self._table.setItem(row, 2, tit)
                 self._table.setItem(row, 3, QTableWidgetItem(
                     f"({count} similar events — click ▶ to expand)"))
+                self._table.setItem(row, 4, _guard_header_item())
                 self._row_event_idx.append(-1)
                 self._groups[row] = {"start": start, "count": count,
                                      "et": et, "collapsed": True}
@@ -2419,6 +2764,7 @@ class MainWindow(QMainWindow):
                     ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
                     self._table.setItem(r, 2, ti)
                     self._table.setItem(r, 3, QTableWidgetItem(event_summary(ev)))
+                    self._table.setItem(r, 4, _guard_item(ev))
                     self._row_event_idx.append(i + j)
                     self._table.setRowHidden(r, True)   # start collapsed
                 i += count
@@ -2432,6 +2778,7 @@ class MainWindow(QMainWindow):
                 ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
                 self._table.setItem(row, 2, ti)
                 self._table.setItem(row, 3, QTableWidgetItem(event_summary(ev)))
+                self._table.setItem(row, 4, _guard_item(ev))
                 self._row_event_idx.append(i)
                 i += 1
 
@@ -2746,6 +3093,72 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self._set_status(f"Could not open folder: {e}", "#f38ba8")
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION: Pixel Guard Handlers
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _on_guard_enabled_changed(self, s: int):
+        if not self._current: return
+        self._current.pixel_guard_enabled = bool(s)
+        self._persist_current()
+
+    def _on_guard_flags_changed(self):
+        if not self._current: return
+        raw = self._guard_flags_edit.text()
+        self._current.pixel_guard_red_flags = [
+            f.strip() for f in raw.split(",") if f.strip()]
+        self._persist_current()
+
+    def _on_guard_key_changed(self):
+        if not self._current: return
+        self._current.pixel_guard_correction_key = self._guard_key_edit.text().strip() or "b"
+        self._persist_current()
+
+    def _on_guard_macro_changed(self, _idx: int):
+        if not self._current: return
+        self._current.pixel_guard_correction_macro = (
+            self._guard_macro_combo.currentData() or "")
+        self._persist_current()
+
+    def _on_guard_cap_changed(self):
+        if not self._current: return
+        self._current.pixel_guard_cap_x_pct = self._guard_cap_x_spin.value()
+        self._current.pixel_guard_cap_y_pct = self._guard_cap_y_spin.value()
+        self._current.pixel_guard_cap_w_pct = self._guard_cap_w_spin.value()
+        self._current.pixel_guard_cap_h_pct = self._guard_cap_h_spin.value()
+        self._persist_current()
+
+    def _test_guard_ocr(self):
+        """Capture the configured region right now and show the OCR result."""
+        if not _PILLOW_OK or not _TESSERACT_OK:
+            QMessageBox.warning(self, "Pixel Guard",
+                "Pillow and/or pytesseract are not installed.\n\n"
+                "Install them:\n"
+                "  pip install Pillow pytesseract\n\n"
+                "Also ensure the Tesseract binary is on your PATH:\n"
+                "  https://github.com/UB-Mannheim/tesseract/wiki")
+            return
+        m = self._current
+        hwnd = None
+        if m and m.use_target_window and m.target_window_title:
+            hwnd = find_window_hwnd(m.target_window_title)
+        x_pct = self._guard_cap_x_spin.value()
+        y_pct = self._guard_cap_y_spin.value()
+        w_pct = self._guard_cap_w_spin.value()
+        h_pct = self._guard_cap_h_spin.value()
+        text = _pixel_ocr_region(hwnd, x_pct, y_pct, w_pct, h_pct)
+        flags = getattr(m, "pixel_guard_red_flags", []) if m else []
+        matched = _pixel_flags_match(text, flags)
+        color   = "#f38ba8" if matched else "#a6e3a1"
+        result  = (f"OCR result: '{text or '(empty)'}'\n\n"
+                   + (f"🚩 RED FLAG matched: '{matched}'" if matched
+                      else "✓ No red flags matched."))
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Pixel Guard — OCR Test")
+        msg.setText(f"<span style='color:{color}'>{result}</span>")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.exec()
+
     def _rebuild_hotkeys(self):
         hmap = {}
         for m in self._macros:
@@ -2984,6 +3397,12 @@ class MainWindow(QMainWindow):
         ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
         self._table.setItem(row, 2, ti)
         self._table.setItem(row, 3, QTableWidgetItem(event_summary(ev)))
+        guard_it = QTableWidgetItem()
+        guard_it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable |
+                          Qt.ItemFlag.ItemIsUserCheckable)
+        guard_it.setCheckState(Qt.CheckState.Unchecked)
+        guard_it.setToolTip("Check to run Pixel Bot OCR guard before this event")
+        self._table.setItem(row, 4, guard_it)
         self._row_event_idx.append(n - 1)
         if ev["event_type"] not in {et for et, cb in self._ev_filters.items() if cb.isChecked()}:
             self._table.setRowHidden(row, True)
@@ -3014,7 +3433,8 @@ class MainWindow(QMainWindow):
         if not m.events:
             self._set_status("No events to play.", "#fab387"); return
         if m.id in self._players: return
-        p = PlayerThread(m)
+        p = PlayerThread(m, all_macros=self._macros)
+        p.guard_sig.connect(self._on_guard_triggered)
         p.started_sig.connect(self._on_play_started)
         p.stopped_sig.connect(self._on_play_stopped)
         p.progress_sig.connect(self._on_play_progress)
@@ -3077,6 +3497,13 @@ class MainWindow(QMainWindow):
             self._set_status(f"▶ '{label}' — Interception driver (kernel input).", "#89b4fa")
         elif backend_name == "serial_hid":
             self._set_status(f"▶ '{label}' — Serial HID (real USB device).", "#cba6f7")
+
+    def _on_guard_triggered(self, mid: str, flag: str):
+        m = self._find(mid)
+        label = m.name if m else mid
+        self._set_status(
+            f"🛡 Guard triggered in '{label}' — red flag: '{flag}'.  Correction running, restarting…",
+            "#f9e2af")
 
     def _on_play_stopped(self, mid: str):
         self._players.pop(mid, None); self._refresh_list(); self._update_play_btns()

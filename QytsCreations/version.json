@@ -1,4 +1,4 @@
 {
-  "version": "1.21",
-  "notes": "v1.21: fix PyInstaller temp-dir cleanup error on stop/quit; 3-window simultaneous targeting with drag-pick cursor selector; diagnostic + crash log copy buttons in topbar; crash log always flushed before copy."
+  "version": "1.22",
+  "notes": "v1.22: Pixel Bot Guard — per-event OCR screen check, red-flag location detection, auto-correction key or macro, skip-leading-keyboard restart logic, dedicated Guard tab."
 }
