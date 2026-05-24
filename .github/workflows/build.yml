@@ -18,6 +18,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -54,11 +56,37 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"notes={notes}\n")
 
+      - name: Rename exe with version
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          Copy-Item "dist\QytCroRec.exe" "dist\QytCroRec_v$v.exe"
+          # Also place in repo dist folder (tracked)
+          New-Item -ItemType Directory -Force "..\QytsCreations\dist" | Out-Null
+          Copy-Item "dist\QytCroRec_v$v.exe" "..\QytsCreations\dist\QytCroRec_v$v.exe" -ErrorAction SilentlyContinue
+
+      - name: Commit versioned exe back to repo
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Remove old versioned exes, keep only latest
+          Get-ChildItem "QytsCreations\dist\QytCroRec_v*.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne "QytCroRec_v$v.exe" } |
+            ForEach-Object { git rm --cached $_.FullName.Replace($PWD+"\","") 2>$null; Remove-Item $_ -Force }
+          git add "QytsCreations/dist/QytCroRec_v$v.exe"
+          git diff --cached --quiet || git commit -m "ci: add QytCroRec_v$v.exe to dist [skip ci]"
+          git push
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: QytCroRec v${{ steps.version.outputs.version }}
           body: ${{ steps.notes.outputs.notes }}
-          files: QytsCreations/dist/QytCroRec.exe
+          files: |
+            QytsCreations/dist/QytCroRec.exe
+            QytsCreations/dist/QytCroRec_v${{ steps.version.outputs.version }}.exe
           make_latest: true

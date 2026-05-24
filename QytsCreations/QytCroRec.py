@@ -3236,6 +3236,15 @@ class MainWindow(QMainWindow):
         btn_crash.clicked.connect(self._copy_crash_log)
         row.addWidget(btn_crash)
         row.addSpacing(12)
+        btn_tray = QPushButton("⊟ Tray")
+        btn_tray.setToolTip("Minimize to system tray")
+        btn_tray.setStyleSheet(
+            "QPushButton{background:#313244;color:#a6adc8;border:1px solid #45475a;"
+            "border-radius:5px;padding:4px 10px;font-size:12px;}"
+            "QPushButton:hover{background:#45475a;color:#cdd6f4;}")
+        btn_tray.clicked.connect(self._minimize_to_tray)
+        row.addWidget(btn_tray)
+        row.addSpacing(6)
         title = QLabel(f"QytCroRec v{__version__}")
         title.setStyleSheet("font-size:16px;font-weight:bold;color:#89b4fa;")
         row.addWidget(title)
@@ -4296,6 +4305,13 @@ class MainWindow(QMainWindow):
             if lw._table.hasFocus():
                 lw._del_selected_events(); return
 
+    def _minimize_to_tray(self):
+        self._storage.save_groups(self._groups)
+        self.hide()
+        self._tray.showMessage("QytCroRec",
+            "Running in system tray. Double-click to restore.",
+            QSystemTrayIcon.MessageIcon.Information, 2500)
+
     def _quit_app(self):
         self._stop_all()
         deadline = time.perf_counter() + 1.5
@@ -4310,10 +4326,25 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._storage.save_groups(self._groups)
-        event.ignore(); self.hide()
-        self._tray.showMessage("QytCroRec",
-            "Running in system tray. Double-click to restore.",
-            QSystemTrayIcon.MessageIcon.Information, 2500)
+        msg = QMessageBox(self)
+        msg.setWindowTitle("QytCroRec")
+        msg.setText("What would you like to do?")
+        btn_tray = msg.addButton("Minimize to Tray", QMessageBox.ButtonRole.AcceptRole)
+        btn_quit = msg.addButton("Close Application", QMessageBox.ButtonRole.DestructiveRole)
+        msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == btn_quit:
+            event.accept()
+            self._quit_app()
+        elif clicked == btn_tray:
+            event.ignore()
+            self.hide()
+            self._tray.showMessage("QytCroRec",
+                "Running in system tray. Double-click to restore.",
+                QSystemTrayIcon.MessageIcon.Information, 2500)
+        else:
+            event.ignore()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
