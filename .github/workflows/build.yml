@@ -2,12 +2,8 @@ name: Build & Release
 
 on:
   push:
-    paths:
-      - 'QytsCreations/QytCroRec.py'
-      - 'QytsCreations/QytCroRec.spec'
-      - 'QytsCreations/requirements.txt'
-    branches:
-      - main
+    branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -27,19 +23,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: QytsCreations/requirements.txt
 
-      - name: Cache PyInstaller bootloader
-        uses: actions/cache@v4
-        with:
-          path: ~\AppData\Local\pyinstaller
-          key: pyinstaller-${{ runner.os }}-py3.11
+      - name: Install Tesseract-OCR
+        shell: cmd
+        run: choco install tesseract --yes --no-progress
 
-      - name: Install dependencies
-        run: |
-          pip install pyinstaller
-          pip install -r requirements.txt
+      - name: Install Python dependencies
+        run: pip install --upgrade pyinstaller PyQt6 pynput Pillow pytesseract
 
       - name: Extract version
         id: version
@@ -71,5 +61,4 @@ jobs:
           name: QytCroRec v${{ steps.version.outputs.version }}
           body: ${{ steps.notes.outputs.notes }}
           files: QytsCreations/dist/QytCroRec.exe
-          prerelease: true
-          make_latest: false
+          make_latest: true

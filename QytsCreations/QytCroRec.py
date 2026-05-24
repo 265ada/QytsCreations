@@ -18,12 +18,13 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.23"
+__version__ = "1.25"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
 UPDATE_VERSION_URL = "https://raw.githubusercontent.com/265ada/QytsCreations/main/QytsCreations/version.json"
 UPDATE_SCRIPT_URL  = "https://raw.githubusercontent.com/265ada/QytsCreations/main/QytsCreations/QytCroRec.py"
+UPDATE_EXE_URL     = "https://github.com/265ada/QytsCreations/releases/latest/download/QytCroRec.exe"
 AUTO_UPDATE_ENABLED = True   # set False to disable startup check
 
 import sys, json, time, uuid, copy, threading, os, urllib.request, urllib.error
@@ -171,12 +172,58 @@ class Macro:
     pixel_guard_cap_w_pct:         float = 0.24
     pixel_guard_cap_h_pct:         float = 0.06
 
+    # Lane-level enable/disable (lane 0 = primary, always enabled)
+    lane_enabled: bool  = True
+
     def clone(self) -> "Macro":
         m = copy.deepcopy(self)
         m.id = str(uuid.uuid4())
         m.name = f"{m.name} (copy)"
         m.created_at = time.time()
         return m
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MACRO GROUP — primary lane + up to 2 optional secondary lanes.
+#   Lane 0 = Primary (always runs, controls repeat).
+#   Lane 1 = Secondary 1 (runs after Primary if lane_enabled=True).
+#   Lane 2 = Secondary 2 (runs after Secondary 1 if lane_enabled=True).
+# ──────────────────────────────────────────────────────────────────────────────
+
+_GROUP_FIELDS: set = set()   # filled after dataclass defined
+
+@dataclass
+class MacroGroup:
+    id:   str  = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str  = "New Group"
+    # Serialised as a list of Macro dicts; held as list[Macro] at runtime.
+    lanes: list = field(default_factory=list)
+
+    def get_lane(self, idx: int) -> Optional["Macro"]:
+        if 0 <= idx < len(self.lanes):
+            return self.lanes[idx]
+        return None
+
+    def ensure_lanes(self, n: int = 3):
+        """Pad lanes list to at least n entries with blank Macros."""
+        labels = ["Primary", "Secondary 1", "Secondary 2"]
+        while len(self.lanes) < n:
+            i = len(self.lanes)
+            m = Macro(name=labels[i] if i < len(labels) else f"Lane {i+1}")
+            if i > 0:
+                m.lane_enabled = False
+            self.lanes.append(m)
+
+    def active_lanes(self) -> list:
+        """Return lanes that should run (lane 0 always, others only if enabled+has events)."""
+        out = []
+        for i, lane in enumerate(self.lanes):
+            if i == 0 or (lane.lane_enabled and lane.events):
+                out.append(lane)
+        return out
+
+
+_GROUP_FIELDS = {f.name for f in dataclasses.fields(MacroGroup)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -205,36 +252,87 @@ DEFAULT_SHORTCUTS = {k: v for k, _, v in SHORTCUT_DEFS}
 
 _MACRO_FIELDS = {f.name for f in dataclasses.fields(Macro)}
 
+def _macro_from_dict(d: dict) -> Macro:
+    events = d.pop("events", [])
+    m = Macro(**{k: v for k, v in d.items() if k in _MACRO_FIELDS})
+    m.events = events
+    return m
+
+
 class Storage:
     def __init__(self):
         self.dir = Path.home() / ".macro_recorder"
         self.dir.mkdir(exist_ok=True)
-        self.macros_path    = self.dir / "macros.json"
+        self.groups_path    = self.dir / "groups.json"
+        self.macros_path    = self.dir / "macros.json"   # legacy
         self.shortcuts_path = self.dir / "shortcuts.json"
 
-    def save_macros(self, macros: list):
-        data = json.dumps([asdict(m) for m in macros], indent=2)
-        # Keep a rolling backup before overwriting
-        bak = self.macros_path.with_suffix(".bak.json")
+    # ── Groups (new primary format) ───────────────────────────────────────────
+
+    def save_groups(self, groups: list):
+        """Serialise list[MacroGroup] → groups.json."""
+        def _ser_group(g: MacroGroup) -> dict:
+            return {
+                "id":    g.id,
+                "name":  g.name,
+                "lanes": [asdict(lane) for lane in g.lanes],
+            }
+        bak = self.groups_path.with_suffix(".bak.json")
+        if self.groups_path.exists():
+            import shutil; shutil.copy2(self.groups_path, bak)
+        self.groups_path.write_text(
+            json.dumps([_ser_group(g) for g in groups], indent=2), encoding="utf-8")
+
+    def load_groups(self) -> list:
+        """Load groups.json; if absent, migrate old macros.json (each macro → 1-lane group)."""
+        if self.groups_path.exists():
+            try:
+                groups = []
+                for gd in json.loads(self.groups_path.read_text(encoding="utf-8")):
+                    g = MacroGroup(id=gd.get("id", str(uuid.uuid4())),
+                                   name=gd.get("name", "Group"))
+                    for ld in gd.get("lanes", []):
+                        ld2 = dict(ld)
+                        g.lanes.append(_macro_from_dict(ld2))
+                    g.ensure_lanes()
+                    groups.append(g)
+                return groups
+            except Exception as e:
+                print(f"Groups load error: {e}")
+                return []
+
+        # ── Migrate from legacy macros.json ──────────────────────────────────
         if self.macros_path.exists():
-            import shutil
-            shutil.copy2(self.macros_path, bak)
-        self.macros_path.write_text(data, encoding="utf-8")
+            try:
+                groups = []
+                for d in json.loads(self.macros_path.read_text(encoding="utf-8")):
+                    d2 = dict(d)
+                    m = _macro_from_dict(d2)
+                    g = MacroGroup(id=str(uuid.uuid4()), name=m.name)
+                    g.lanes.append(m)
+                    g.ensure_lanes()
+                    groups.append(g)
+                return groups
+            except Exception as e:
+                print(f"Legacy macro load error: {e}")
+        return []
+
+    # ── Legacy helpers (kept so existing call-sites don't break) ─────────────
+
+    def save_macros(self, macros: list):
+        """Back-compat shim — wraps each Macro in a group and calls save_groups."""
+        groups = []
+        for m in macros:
+            g = MacroGroup(id=str(uuid.uuid4()), name=m.name)
+            g.lanes.append(m); g.ensure_lanes()
+            groups.append(g)
+        self.save_groups(groups)
 
     def load_macros(self) -> list:
-        if not self.macros_path.exists():
-            return []
-        try:
-            result = []
-            for d in json.loads(self.macros_path.read_text(encoding="utf-8")):
-                events = d.pop("events", [])
-                m = Macro(**{k: v for k, v in d.items() if k in _MACRO_FIELDS})
-                m.events = events
-                result.append(m)
-            return result
-        except Exception as e:
-            print(f"Macro load error: {e}")
-            return []
+        """Back-compat — returns flat list of primary-lane Macros."""
+        return [g.lanes[0] for g in self.load_groups() if g.lanes]
+
+    # ── Shortcuts ─────────────────────────────────────────────────────────────
 
     def save_shortcuts(self, sc: dict):
         self.shortcuts_path.write_text(json.dumps(sc, indent=2), encoding="utf-8")
@@ -244,7 +342,6 @@ class Storage:
             return dict(DEFAULT_SHORTCUTS)
         try:
             saved = json.loads(self.shortcuts_path.read_text(encoding="utf-8"))
-            # Merge with defaults so new actions always have a key
             out = dict(DEFAULT_SHORTCUTS)
             out.update(saved)
             return out
@@ -1588,6 +1685,226 @@ def _sleep_until(target: float, stop: threading.Event):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CHAIN PLAYER THREAD
+#   Runs all enabled lanes of a MacroGroup in sequence.
+#   Lane 0 (Primary) controls the repeat count.  Secondary lanes run once per
+#   Primary repeat.  Stop propagates to the currently running lane.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ChainPlayerThread(QThread):
+    # (group_id, lane_index, lane_macro_id)
+    lane_started  = pyqtSignal(str, int, str)
+    lane_stopped  = pyqtSignal(str, int, str)
+    chain_stopped = pyqtSignal(str)          # group_id
+    # (group_id, lane_idx, event_idx, total)
+    progress_sig  = pyqtSignal(str, int, int, int)
+    # (group_id, lane_idx, backend_name)
+    mode_sig      = pyqtSignal(str, int, str)
+    # (group_id, lane_idx, flag_text)
+    guard_sig     = pyqtSignal(str, int, str)
+    # shared human-readable log
+    log_sig       = pyqtSignal(str)
+
+    def __init__(self, group: "MacroGroup", all_groups: list):
+        super().__init__()
+        self.group      = group
+        self.all_groups = all_groups
+        self._stop      = threading.Event()
+        self._cur_player: Optional[PlayerThread] = None
+
+    def stop(self):
+        self._stop.set()
+        if self._cur_player:
+            self._cur_player.stop()
+
+    # Flatten all macros from all groups for pixel-guard correction lookup
+    def _all_macros(self) -> list:
+        out = []
+        for g in self.all_groups:
+            out.extend(g.lanes)
+        return out
+
+    def run(self):
+        try:
+            self._run_chain()
+        except Exception as e:
+            _log_crash(f"ChainPlayerThread crashed: {e}\n{traceback.format_exc()}")
+        finally:
+            self.chain_stopped.emit(self.group.id)
+
+    def _run_chain(self):
+        g          = self.group
+        primary    = g.lanes[0]
+        reps       = primary.repeat_count or 10_000_000
+        all_macros = self._all_macros()
+
+        for rep in range(reps):
+            if self._stop.is_set():
+                break
+            for lane_idx, lane in enumerate(g.lanes):
+                if self._stop.is_set():
+                    break
+                # Lane 0 always runs; others only if enabled and have events
+                if lane_idx > 0 and (not lane.lane_enabled or not lane.events):
+                    continue
+
+                self.lane_started.emit(g.id, lane_idx, lane.id)
+                self.log_sig.emit(
+                    f"[{g.name}] Lane {lane_idx} '{lane.name}' starting "
+                    f"(rep {rep+1}/{reps if primary.repeat_count else '∞'})")
+
+                ok = self._run_one_lane(lane_idx, lane, all_macros)
+
+                self.lane_stopped.emit(g.id, lane_idx, lane.id)
+                if not ok:
+                    self.log_sig.emit(
+                        f"[{g.name}] Lane {lane_idx} '{lane.name}' stopped early.")
+                    break   # stop remaining lanes in this rep if primary aborted
+                self.log_sig.emit(
+                    f"[{g.name}] Lane {lane_idx} '{lane.name}' complete.")
+
+            if self._stop.is_set():
+                break
+
+    def _run_one_lane(self, lane_idx: int, lane: "Macro",
+                      all_macros: list) -> bool:
+        """Run a single lane to completion. Returns True on normal finish."""
+        backend = create_backend(lane)
+        if backend is None:
+            self.mode_sig.emit(self.group.id, lane_idx,
+                               f"error:{_LAST_BACKEND_ERROR}")
+            return False
+
+        self.mode_sig.emit(self.group.id, lane_idx, backend.name)
+
+        # Log attach info
+        hwnd = None
+        pid  = 0
+        proc_name = ""
+        if lane.use_target_window and lane.target_window_title:
+            hwnd = find_window_hwnd(lane.target_window_title)
+            if hwnd:
+                pid = get_window_pid(hwnd)
+                try:
+                    import psutil
+                    proc_name = psutil.Process(pid).name()
+                except Exception:
+                    proc_name = ""
+        hook_status = ""
+        if lane.input_backend == "detours" and pid:
+            hook_status = "Hook: Loaded" if _pipe_exists(pid) else "Hook: Not loaded"
+        self.log_sig.emit(
+            f"  Attached — PID {pid}  Window: {lane.target_window_title or '(any)'}  "
+            f"Process: {proc_name}  Backend: {backend.name}  {hook_status}")
+
+        # Build a one-shot PlayerThread (repeat=1) and run it synchronously
+        # by driving its inner logic on THIS thread.
+        class _StopProxy:
+            def __init__(self, outer): self._outer = outer
+            def is_set(self): return self._outer._stop.is_set()
+
+        stop_proxy  = _StopProxy(self)
+        target_hwnd = hwnd
+        events      = lane.events
+        total       = len(events)
+        speed       = max(0.01, lane.speed_multiplier)
+
+        try:
+            i  = 0
+            skip_initial_kb = False
+            t0 = time.perf_counter()
+
+            while i < total and not self._stop.is_set():
+                ev = events[i]
+                if skip_initial_kb:
+                    if ev["event_type"] in ("key_press", "key_release"):
+                        i += 1; continue
+                    else:
+                        skip_initial_kb = False
+
+                _sleep_until(t0 + ev["timestamp"] / speed, self._stop)
+                if self._stop.is_set():
+                    break
+
+                # Pixel guard
+                guard_result = self._pixel_guard(ev, lane, backend, target_hwnd,
+                                                  all_macros, lane_idx)
+                if guard_result:
+                    i = 0; skip_initial_kb = True; t0 = time.perf_counter()
+                    continue
+
+                self._fire(ev, backend, target_hwnd)
+                self.progress_sig.emit(self.group.id, lane_idx, i, total)
+                i += 1
+
+        finally:
+            try: backend.close()
+            except Exception: pass
+
+        return not self._stop.is_set()
+
+    def _pixel_guard(self, ev, lane, backend, target_hwnd,
+                     all_macros, lane_idx) -> bool:
+        if not ev.get("pixel_guard"): return False
+        if not getattr(lane, "pixel_guard_enabled", False): return False
+        red_flags = getattr(lane, "pixel_guard_red_flags", [])
+        if not red_flags: return False
+        text = _pixel_ocr_region(
+            target_hwnd,
+            getattr(lane, "pixel_guard_cap_x_pct", 0.75),
+            getattr(lane, "pixel_guard_cap_y_pct", 0.02),
+            getattr(lane, "pixel_guard_cap_w_pct", 0.24),
+            getattr(lane, "pixel_guard_cap_h_pct", 0.06),
+        )
+        matched = _pixel_flags_match(text, red_flags)
+        if matched is None: return False
+        self.guard_sig.emit(self.group.id, lane_idx, matched)
+        self.log_sig.emit(
+            f"  🛡 Guard matched '{matched}' — running correction + restart")
+        corr_id = getattr(lane, "pixel_guard_correction_macro", "")
+        if corr_id:
+            corr = next((m for m in all_macros if m.id == corr_id), None)
+            if corr and corr.events:
+                self._run_inline(corr, backend, target_hwnd); return True
+        key = getattr(lane, "pixel_guard_correction_key", "b") or "b"
+        try: backend.key_down(key); time.sleep(0.05); backend.key_up(key)
+        except Exception: pass
+        return True
+
+    def _run_inline(self, m: "Macro", backend, target_hwnd):
+        speed = max(0.01, m.speed_multiplier)
+        t0 = time.perf_counter()
+        for ev in m.events:
+            if self._stop.is_set(): break
+            _sleep_until(t0 + ev["timestamp"] / speed, self._stop)
+            if not self._stop.is_set():
+                self._fire(ev, backend, target_hwnd)
+
+    def _fire(self, ev: dict, b: "InputBackend", target_hwnd):
+        if self._stop.is_set(): return
+        d, t = ev["data"], ev["event_type"]
+        def _xy():
+            x, y = int(d["x"]), int(d["y"])
+            if d.get("coord_space") == "client" and target_hwnd:
+                cw, ch = client_rect(target_hwnd)
+                if cw > 0 and ch > 0:
+                    x = max(0, min(x, cw-1)); y = max(0, min(y, ch-1))
+                x, y = client_to_screen(target_hwnd, x, y)
+            return x, y
+        try:
+            if   t == "key_press":   b.key_down(d["key"])
+            elif t == "key_release": b.key_up(d["key"])
+            elif t == "mouse_move":
+                x, y = _xy(); b.mouse_move(x, y)
+            elif t == "mouse_click":
+                x, y = _xy(); b.mouse_button(x, y, d["button"], d["pressed"])
+            elif t == "mouse_scroll":
+                x, y = _xy(); b.mouse_scroll(x, y, int(d["dx"]), int(d["dy"]))
+        except Exception as e:
+            _log_crash(f"[chain fire] {t}: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # HOTKEY MANAGER
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1626,10 +1943,12 @@ class HotkeyManager:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class AutoUpdater:
-    def __init__(self, current_version: str, version_url: str, script_url: str):
-        self.current = current_version
+    def __init__(self, current_version: str, version_url: str,
+                 script_url: str, exe_url: str = ""):
+        self.current     = current_version
         self.version_url = version_url
         self.script_url  = script_url
+        self.exe_url     = exe_url
 
     @staticmethod
     def _vtuple(v: str):
@@ -1651,26 +1970,64 @@ class AutoUpdater:
             return {"version": remote, "notes": info.get("notes", "")}
         return None
 
-    def download_and_install(self, target_path: Path, timeout: float = 15.0) -> bool:
-        """Download new script, write `.new` then swap.  Returns True on success."""
-        try:
-            with urllib.request.urlopen(self.script_url, timeout=timeout) as r:
-                data = r.read()
-        except Exception as e:
-            print(f"Update download failed: {e}")
-            return False
-        if len(data) < 1024 or b"Macro Recorder" not in data:
-            print("Update content sanity check failed.")
-            return False
-        new_path = target_path.with_suffix(".new.py")
-        bak_path = target_path.with_suffix(".prev.py")
-        new_path.write_bytes(data)
-        if target_path.exists():
-            try: bak_path.unlink()
-            except FileNotFoundError: pass
-            target_path.replace(bak_path)
-        new_path.replace(target_path)
-        return True
+    def download_and_install(self, target_path: Path, timeout: float = 60.0) -> bool:
+        """Download update and swap in.  Returns True on success.
+        Exe mode: downloads new exe to a temp path + writes a batch swap script.
+        Script mode: classic .new.py swap.
+        """
+        if getattr(sys, "frozen", False):
+            # ── EXE MODE ─────────────────────────────────────────────────────
+            if not self.exe_url:
+                print("No EXE update URL configured.")
+                return False
+            current_exe = Path(sys.executable)
+            new_exe     = current_exe.with_name("QytCroRec_update.exe")
+            batch_path  = current_exe.with_name("_qyt_update.bat")
+            try:
+                with urllib.request.urlopen(self.exe_url, timeout=timeout) as r:
+                    data = r.read()
+            except Exception as e:
+                print(f"Exe update download failed: {e}")
+                return False
+            if len(data) < 1024 * 100:   # < 100 KB — almost certainly wrong
+                print("Exe update sanity check failed (too small).")
+                return False
+            new_exe.write_bytes(data)
+            # Batch script: wait, swap, relaunch, self-delete
+            batch_path.write_text(
+                "@echo off\r\n"
+                "timeout /t 2 /nobreak >nul\r\n"
+                f"move /y \"{new_exe}\" \"{current_exe}\"\r\n"
+                f"start \"\" \"{current_exe}\"\r\n"
+                f"del /q \"{batch_path}\"\r\n",
+                encoding="ascii"
+            )
+            subprocess.Popen(
+                ["cmd", "/c", str(batch_path)],
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+            )
+            return True   # caller should quit after this
+        else:
+            # ── SCRIPT MODE ──────────────────────────────────────────────────
+            try:
+                with urllib.request.urlopen(self.script_url, timeout=timeout) as r:
+                    data = r.read()
+            except Exception as e:
+                print(f"Script update download failed: {e}")
+                return False
+            if len(data) < 1024 or b"Macro Recorder" not in data:
+                print("Script update content sanity check failed.")
+                return False
+            new_path = target_path.with_suffix(".new.py")
+            bak_path = target_path.with_suffix(".prev.py")
+            new_path.write_bytes(data)
+            if target_path.exists():
+                try: bak_path.unlink()
+                except FileNotFoundError: pass
+                target_path.replace(bak_path)
+            new_path.replace(target_path)
+            return True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1766,63 +2123,902 @@ EVENT_COLORS = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# LANE WIDGET
+#   Self-contained widget for one macro lane.  Holds its own Macro reference
+#   and exposes signals for the parent MainWindow to coordinate.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class LaneWidget(QWidget):
+    """Full-featured per-lane panel: settings + events + guard."""
+
+    changed       = pyqtSignal(str)   # macro id — any field changed
+    record_req    = pyqtSignal(str)   # macro id
+    play_req      = pyqtSignal(str)   # macro id
+    stop_req      = pyqtSignal(str)   # macro id
+    window_picked = pyqtSignal(str, int, str)  # macro_id, slot, title
+
+    def __init__(self, macro: Macro, lane_index: int,
+                 all_macros_fn,        # callable → list[Macro]
+                 parent=None):
+        super().__init__(parent)
+        self._macro        = macro
+        self._lane_index   = lane_index
+        self._all_macros   = all_macros_fn   # late-bound so it sees current list
+        self._is_primary   = (lane_index == 0)
+        self._row_event_idx: list = []
+        self._groups: dict = {}
+        self._ev_filters: dict = {}
+        self._recording    = False
+        self._playing      = False
+        self._build()
+
+    @property
+    def macro(self) -> Macro:
+        return self._macro
+
+    def set_macro(self, macro: Macro):
+        self._macro = macro
+        self._load()
+
+    def set_playing(self, playing: bool):
+        self._playing = playing
+        self._btn_play.setEnabled(not playing)
+        self._btn_stop.setEnabled(playing)
+        self._btn_record.setEnabled(not playing and not self._recording)
+        if playing:
+            self._status_lbl.setText("▶ Playing")
+            self._status_lbl.setStyleSheet("color: #a6e3a1; font-weight: bold;")
+        else:
+            self._status_lbl.setText("Idle")
+            self._status_lbl.setStyleSheet("color: #585b70;")
+
+    def set_recording(self, recording: bool):
+        self._recording = recording
+        if recording:
+            self._btn_record.setText("⏹ Stop Rec")
+            self._status_lbl.setText("● REC")
+            self._status_lbl.setStyleSheet("color: #f38ba8; font-weight: bold;")
+        else:
+            self._btn_record.setText("⏺ Record")
+            self._status_lbl.setText("Idle")
+            self._status_lbl.setStyleSheet("color: #585b70;")
+
+    def add_event(self, ev: dict):
+        """Append one live-captured event to the table (during recording)."""
+        self._macro.events.append(ev)
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+        n = len(self._macro.events)
+        self._table.setItem(row, 0, QTableWidgetItem(str(n)))
+        self._table.setItem(row, 1, QTableWidgetItem(f"{ev['timestamp']:.3f}"))
+        ti = QTableWidgetItem(ev["event_type"])
+        ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
+        self._table.setItem(row, 2, ti)
+        self._table.setItem(row, 3, QTableWidgetItem(event_summary(ev)))
+        gitem = QTableWidgetItem()
+        gitem.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable |
+                       Qt.ItemFlag.ItemIsUserCheckable)
+        gitem.setCheckState(Qt.CheckState.Unchecked)
+        self._table.setItem(row, 4, gitem)
+        self._row_event_idx.append(n - 1)
+        self._table.scrollToBottom()
+        self._ev_count.setText(f"{n} events")
+
+    def highlight_event(self, idx: int):
+        if 0 <= idx < self._table.rowCount():
+            self._table.selectRow(idx)
+            self._table.scrollTo(self._table.model().index(idx, 0))
+
+    # ── Build ─────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        from PyQt6.QtWidgets import QScrollArea
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Lane header ───────────────────────────────────────────────────────
+        hdr = QWidget()
+        hdr.setStyleSheet("background: #252535; border-bottom: 1px solid #313244;")
+        hdr_lay = QHBoxLayout(hdr)
+        hdr_lay.setContentsMargins(10, 6, 10, 6)
+        hdr_lay.setSpacing(8)
+
+        if not self._is_primary:
+            self._enable_chk = QCheckBox("Enabled")
+            self._enable_chk.setChecked(self._macro.lane_enabled)
+            self._enable_chk.setToolTip(
+                "When checked this lane runs after the previous lane completes.")
+            self._enable_chk.stateChanged.connect(self._on_enabled_changed)
+            hdr_lay.addWidget(self._enable_chk)
+        else:
+            lbl = QLabel("⭐ Primary")
+            lbl.setStyleSheet("color: #f9e2af; font-weight: bold;")
+            hdr_lay.addWidget(lbl)
+
+        self._status_lbl = QLabel("Idle")
+        self._status_lbl.setStyleSheet("color: #585b70;")
+        hdr_lay.addWidget(self._status_lbl)
+        hdr_lay.addStretch()
+
+        # Record / Play / Stop
+        self._btn_record = QPushButton("⏺ Record")
+        self._btn_record.setObjectName("btn_record")
+        self._btn_record.setMaximumWidth(110)
+        self._btn_record.clicked.connect(lambda: self.record_req.emit(self._macro.id))
+
+        self._btn_play = QPushButton("▶ Play")
+        self._btn_play.setObjectName("btn_play")
+        self._btn_play.setMaximumWidth(80)
+        self._btn_play.clicked.connect(lambda: self.play_req.emit(self._macro.id))
+
+        self._btn_stop = QPushButton("■ Stop")
+        self._btn_stop.setObjectName("btn_stop")
+        self._btn_stop.setMaximumWidth(80)
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.clicked.connect(lambda: self.stop_req.emit(self._macro.id))
+
+        for b in (self._btn_record, self._btn_play, self._btn_stop):
+            hdr_lay.addWidget(b)
+
+        root.addWidget(hdr)
+
+        # ── Tabs: Settings / Events / Guard ───────────────────────────────────
+        tabs = QTabWidget()
+        tabs.setStyleSheet(
+            "QTabWidget::pane { border: none; }"
+            "QTabBar::tab { padding: 5px 14px; font-size: 12px; }")
+        tabs.addTab(self._build_settings(), "⚙ Settings")
+        tabs.addTab(self._build_events(),   "⏺ Events")
+        tabs.addTab(self._build_guard(),    "🛡 Guard")
+        root.addWidget(tabs, 1)
+
+    def _build_settings(self) -> QWidget:
+        from PyQt6.QtWidgets import QScrollArea
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        # Name + hotkey
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("Name:"))
+        self._name_edit = QLineEdit(placeholderText="Lane name…")
+        self._name_edit.setText(self._macro.name)
+        self._name_edit.textChanged.connect(self._on_name_changed)
+        r1.addWidget(self._name_edit)
+        r1.addSpacing(12)
+        r1.addWidget(QLabel("Hotkey:"))
+        self._hotkey_edit = QLineEdit(placeholderText="e.g. ctrl+f5")
+        self._hotkey_edit.setMaximumWidth(130)
+        self._hotkey_edit.setText(self._macro.trigger_hotkey)
+        self._hotkey_edit.editingFinished.connect(self._on_hotkey_changed)
+        r1.addWidget(self._hotkey_edit)
+        lay.addLayout(r1)
+
+        # Repeat + speed + mouse
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("Repeat:"))
+        self._repeat_spin = QSpinBox()
+        self._repeat_spin.setRange(0, 99999); self._repeat_spin.setValue(self._macro.repeat_count)
+        self._repeat_spin.setSpecialValueText("∞"); self._repeat_spin.setMaximumWidth(80)
+        self._repeat_spin.valueChanged.connect(self._on_repeat_changed)
+        r2.addWidget(self._repeat_spin); r2.addSpacing(12)
+        r2.addWidget(QLabel("Speed:"))
+        self._speed_spin = QDoubleSpinBox()
+        self._speed_spin.setRange(0.1, 20.0); self._speed_spin.setSingleStep(0.25)
+        self._speed_spin.setValue(self._macro.speed_multiplier); self._speed_spin.setSuffix("×")
+        self._speed_spin.setMaximumWidth(90)
+        self._speed_spin.valueChanged.connect(self._on_speed_changed)
+        r2.addWidget(self._speed_spin); r2.addSpacing(12)
+        self._move_chk = QCheckBox("Record Mouse Moves")
+        self._move_chk.setChecked(self._macro.record_mouse_move)
+        self._move_chk.stateChanged.connect(self._on_move_chk_changed)
+        r2.addWidget(self._move_chk); r2.addStretch()
+        lay.addLayout(r2)
+
+        # Target window
+        win_lbl_style = (
+            "color: #585b70; font-size: 12px; background: #181825;"
+            "border: 1px solid #313244; border-radius: 4px; padding: 3px 10px;")
+
+        self._use_target_chk = QCheckBox("Force Target Window")
+        self._use_target_chk.setChecked(self._macro.use_target_window)
+        self._use_target_chk.stateChanged.connect(self._on_use_target_changed)
+        lay.addWidget(self._use_target_chk)
+
+        rw = QHBoxLayout(); rw.setContentsMargins(20, 0, 0, 0)
+        self._win_lbl = QLabel(self._macro.target_window_title or "(none)")
+        self._win_lbl.setStyleSheet(win_lbl_style); self._win_lbl.setMinimumWidth(200)
+        rw.addWidget(self._win_lbl, 1)
+        self._pick_btn = QPushButton("Pick…"); self._pick_btn.setMaximumWidth(60)
+        self._pick_btn.clicked.connect(lambda: self._pick_window(1))
+        rw.addWidget(self._pick_btn)
+        self._capture_btn = QPushButton("Capture 3s"); self._capture_btn.setMaximumWidth(90)
+        self._capture_btn.clicked.connect(self._capture_window)
+        rw.addWidget(self._capture_btn)
+        self._drag_btn = QPushButton("🎯"); self._drag_btn.setMaximumWidth(36)
+        self._drag_btn.setToolTip("Drag-pick: click any window to select it")
+        self._drag_btn.clicked.connect(lambda: self._start_drag_pick(1))
+        rw.addWidget(self._drag_btn)
+        lay.addLayout(rw)
+
+        # PID / process name readout
+        self._pid_lbl = QLabel("")
+        self._pid_lbl.setStyleSheet("color: #585b70; font-size: 11px; padding-left: 20px;")
+        lay.addWidget(self._pid_lbl)
+        self._refresh_pid_label()
+
+        # Backend + hook
+        r4 = QHBoxLayout()
+        r4.addWidget(QLabel("Backend:"))
+        self._backend_combo = QComboBox()
+        for name, desc, _ in BACKEND_CHOICES:
+            lbl2 = desc
+            if name == "interception" and not InterceptionBackend.available():
+                lbl2 += "   [not installed]"
+            elif name == "serial_hid" and not SerialHIDBackend.available():
+                lbl2 += "   [pyserial not installed]"
+            elif name == "detours":
+                lbl2 += "   [requires hook DLL]"
+            self._backend_combo.addItem(lbl2, name)
+        idx = next((i for i, (n, _, _) in enumerate(BACKEND_CHOICES)
+                    if n == (self._macro.input_backend or "auto")), 0)
+        self._backend_combo.setCurrentIndex(idx)
+        self._backend_combo.setMinimumWidth(280)
+        self._backend_combo.currentIndexChanged.connect(self._on_backend_changed)
+        r4.addWidget(self._backend_combo)
+        self._hook_btn = QPushButton("Hook Status")
+        self._hook_btn.clicked.connect(self._show_hook_status)
+        r4.addWidget(self._hook_btn)
+        self._hook_status_lbl = QLabel("")
+        self._hook_status_lbl.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        r4.addWidget(self._hook_status_lbl)
+        r4.addStretch()
+        lay.addLayout(r4)
+
+        self._update_window_btn_states()
+        lay.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidget(inner); scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; }")
+        return scroll
+
+    def _build_events(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w); lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(5)
+
+        filt_row = QHBoxLayout()
+        filt_row.addWidget(QLabel("Show:"))
+        for et, label in [("key_press","key press"),("key_release","key release"),
+                          ("mouse_move","mouse move"),("mouse_click","mouse click"),
+                          ("mouse_scroll","mouse scroll")]:
+            cb = QCheckBox(label); cb.setChecked(True)
+            cb.setStyleSheet(f"QCheckBox {{ color: {EVENT_COLORS.get(et,'#cdd6f4')}; }}")
+            cb.stateChanged.connect(self._apply_filter)
+            filt_row.addWidget(cb)
+            self._ev_filters[et] = cb
+        filt_row.addStretch()
+        lay.addLayout(filt_row)
+
+        self._table = QTableWidget()
+        self._table.setColumnCount(5)
+        self._table.setHorizontalHeaderLabels(["#", "Time (s)", "Type", "Details", "🛡"])
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        hh.resizeSection(0, 50); hh.resizeSection(1, 100); hh.resizeSection(2, 120)
+        hh.resizeSection(4, 34)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.setStyleSheet("QTableWidget { alternate-background-color: #1a1a2a; }")
+        self._table.verticalHeader().setVisible(True)
+        self._table.verticalHeader().setSectionsMovable(True)
+        self._table.verticalHeader().sectionMoved.connect(self._on_section_moved)
+        self._table.cellClicked.connect(self._on_cell_clicked)
+        self._table.itemChanged.connect(self._on_guard_item_changed)
+        lay.addWidget(self._table)
+
+        ea = QHBoxLayout()
+        btn_clr = QPushButton("Clear All"); btn_clr.clicked.connect(self._clear_events)
+        btn_del = QPushButton("Delete Selected"); btn_del.clicked.connect(self._del_selected_events)
+        ea.addWidget(btn_clr); ea.addWidget(btn_del); ea.addStretch()
+        self._ev_count = QLabel("0 events")
+        self._ev_count.setStyleSheet("color: #585b70; font-size: 11px;")
+        ea.addWidget(self._ev_count)
+        lay.addLayout(ea)
+        return w
+
+    def _build_guard(self) -> QWidget:
+        from PyQt6.QtWidgets import QScrollArea
+        inner = QWidget()
+        lay = QVBoxLayout(inner); lay.setContentsMargins(10, 10, 10, 10); lay.setSpacing(8)
+
+        grp_en = QGroupBox("Pixel Bot Guard")
+        gl_en = QVBoxLayout(grp_en)
+        self._guard_enabled_chk = QCheckBox("Enable Pixel Bot Guard for this lane")
+        self._guard_enabled_chk.setChecked(getattr(self._macro, "pixel_guard_enabled", False))
+        self._guard_enabled_chk.stateChanged.connect(self._on_guard_enabled_changed)
+        gl_en.addWidget(self._guard_enabled_chk)
+        lay.addWidget(grp_en)
+
+        grp_rf = QGroupBox("Red-Flag Locations (comma-separated)")
+        gl_rf = QVBoxLayout(grp_rf)
+        self._guard_flags_edit = QLineEdit(placeholderText="e.g.  The Raft, Danger Zone")
+        self._guard_flags_edit.setText(", ".join(getattr(self._macro, "pixel_guard_red_flags", [])))
+        self._guard_flags_edit.editingFinished.connect(self._on_guard_flags_changed)
+        gl_rf.addWidget(self._guard_flags_edit)
+        lay.addWidget(grp_rf)
+
+        grp_cap = QGroupBox("Capture Region (% of target window)")
+        gl_cap = QVBoxLayout(grp_cap)
+        cap_row = QHBoxLayout()
+        for label, attr, default in [("X", "_guard_cap_x", 0.75),
+                                     ("Y", "_guard_cap_y", 0.02),
+                                     ("W", "_guard_cap_w", 0.24),
+                                     ("H", "_guard_cap_h", 0.06)]:
+            cap_row.addWidget(QLabel(f"{label}:"))
+            sp = QDoubleSpinBox()
+            sp.setRange(0.0, 1.0); sp.setSingleStep(0.01); sp.setValue(default)
+            sp.setDecimals(3); sp.setMaximumWidth(80)
+            sp.valueChanged.connect(self._on_guard_cap_changed)
+            setattr(self, attr + "_spin", sp)
+            cap_row.addWidget(sp)
+        btn_test = QPushButton("🔍 Test OCR"); btn_test.clicked.connect(self._test_ocr)
+        cap_row.addWidget(btn_test); cap_row.addStretch()
+        gl_cap.addLayout(cap_row)
+        lay.addWidget(grp_cap)
+
+        grp_cor = QGroupBox("Correction")
+        gl_cor = QVBoxLayout(grp_cor)
+        cor_row = QHBoxLayout()
+        cor_row.addWidget(QLabel("Key:"))
+        self._guard_key_edit = QLineEdit("b"); self._guard_key_edit.setMaximumWidth(50)
+        self._guard_key_edit.setText(getattr(self._macro, "pixel_guard_correction_key", "b") or "b")
+        self._guard_key_edit.editingFinished.connect(self._on_guard_key_changed)
+        cor_row.addWidget(self._guard_key_edit)
+        cor_row.addSpacing(16); cor_row.addWidget(QLabel("OR Macro:"))
+        self._guard_macro_combo = QComboBox(); self._guard_macro_combo.setMinimumWidth(180)
+        self._guard_macro_combo.currentIndexChanged.connect(self._on_guard_macro_changed)
+        cor_row.addWidget(self._guard_macro_combo); cor_row.addStretch()
+        gl_cor.addLayout(cor_row)
+        lay.addWidget(grp_cor)
+
+        lay.addStretch()
+        self._load_guard_spinners()
+        self.refresh_guard_combo()
+
+        scroll = QScrollArea()
+        scroll.setWidget(inner); scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; }")
+        return scroll
+
+    # ── Load ──────────────────────────────────────────────────────────────────
+
+    def _load(self):
+        m = self._macro
+        for w, v in [(self._name_edit, m.name),
+                     (self._hotkey_edit, m.trigger_hotkey)]:
+            w.blockSignals(True); w.setText(v); w.blockSignals(False)
+        for w, v in [(self._repeat_spin, m.repeat_count),
+                     (self._speed_spin, m.speed_multiplier)]:
+            w.blockSignals(True); w.setValue(v); w.blockSignals(False)
+        for w, v in [(self._move_chk, m.record_mouse_move),
+                     (self._use_target_chk, m.use_target_window)]:
+            w.blockSignals(True); w.setChecked(v); w.blockSignals(False)
+        if not self._is_primary:
+            self._enable_chk.blockSignals(True)
+            self._enable_chk.setChecked(m.lane_enabled)
+            self._enable_chk.blockSignals(False)
+        self._win_lbl.setText(m.target_window_title or "(none)")
+        idx = next((i for i, (n, _, _) in enumerate(BACKEND_CHOICES)
+                    if n == (m.input_backend or "auto")), 0)
+        self._backend_combo.blockSignals(True)
+        self._backend_combo.setCurrentIndex(idx)
+        self._backend_combo.blockSignals(False)
+        self._update_window_btn_states()
+        self._refresh_pid_label()
+        self._load_guard_spinners()
+        self.refresh_guard_combo()
+        self._fill_table()
+
+    def _load_guard_spinners(self):
+        m = self._macro
+        for attr, sp_attr, default in [
+            ("pixel_guard_enabled", None, False),
+            ("pixel_guard_cap_x_pct", "_guard_cap_x_spin", 0.75),
+            ("pixel_guard_cap_y_pct", "_guard_cap_y_spin", 0.02),
+            ("pixel_guard_cap_w_pct", "_guard_cap_w_spin", 0.24),
+            ("pixel_guard_cap_h_pct", "_guard_cap_h_spin", 0.06),
+        ]:
+            if sp_attr:
+                sp = getattr(self, sp_attr, None)
+                if sp:
+                    sp.blockSignals(True)
+                    sp.setValue(getattr(m, attr, default))
+                    sp.blockSignals(False)
+        self._guard_enabled_chk.blockSignals(True)
+        self._guard_enabled_chk.setChecked(getattr(m, "pixel_guard_enabled", False))
+        self._guard_enabled_chk.blockSignals(False)
+        self._guard_flags_edit.blockSignals(True)
+        self._guard_flags_edit.setText(", ".join(getattr(m, "pixel_guard_red_flags", [])))
+        self._guard_flags_edit.blockSignals(False)
+        self._guard_key_edit.blockSignals(True)
+        self._guard_key_edit.setText(getattr(m, "pixel_guard_correction_key", "b") or "b")
+        self._guard_key_edit.blockSignals(False)
+
+    def refresh_guard_combo(self):
+        combo = self._guard_macro_combo
+        combo.blockSignals(True); combo.clear()
+        combo.addItem("(none — use key)", "")
+        cur_id = getattr(self._macro, "pixel_guard_correction_macro", "")
+        sel = 0
+        for i, mac in enumerate(self._all_macros(), start=1):
+            if mac.id == self._macro.id: continue
+            combo.addItem(mac.name, mac.id)
+            if mac.id == cur_id: sel = i
+        combo.setCurrentIndex(sel); combo.blockSignals(False)
+
+    # ── Events table ──────────────────────────────────────────────────────────
+
+    GROUP_THRESHOLD = 3
+
+    def _fill_table(self):
+        m = self._macro
+        self._table.blockSignals(True)
+        self._table.setRowCount(0)
+        self._row_event_idx = []
+        self._groups = {}
+
+        groups = self._build_groups(m.events)
+        gbs = {g[0]: g for g in groups}
+
+        def _guard_item(ev_dict):
+            it = QTableWidgetItem()
+            it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable |
+                        Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(
+                Qt.CheckState.Checked if ev_dict.get("pixel_guard") else Qt.CheckState.Unchecked)
+            return it
+
+        i = 0
+        while i < len(m.events):
+            if i in gbs:
+                start, count, et = gbs[i]
+                row = self._table.rowCount()
+                self._table.insertRow(row)
+                hdr = QTableWidgetItem(f"▶  ×{count}")
+                hdr.setForeground(QColor(EVENT_COLORS.get(et, "#cdd6f4")))
+                hdr.setBackground(QColor("#252535"))
+                hdr.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self._table.setItem(row, 0, hdr)
+                t0 = m.events[start]["timestamp"]
+                t1 = m.events[start+count-1]["timestamp"]
+                self._table.setItem(row, 1, QTableWidgetItem(f"{t0:.3f}—{t1:.3f}"))
+                tit = QTableWidgetItem(et)
+                tit.setForeground(QColor(EVENT_COLORS.get(et, "#cdd6f4")))
+                self._table.setItem(row, 2, tit)
+                self._table.setItem(row, 3, QTableWidgetItem(
+                    f"({count} similar events — click ▶ to expand)"))
+                ph = QTableWidgetItem("—"); ph.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                ph.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._table.setItem(row, 4, ph)
+                self._row_event_idx.append(-1)
+                self._groups[row] = {"start": start, "count": count,
+                                     "et": et, "collapsed": True}
+                for j in range(count):
+                    ev = m.events[i+j]
+                    r = self._table.rowCount(); self._table.insertRow(r)
+                    self._table.setItem(r, 0, QTableWidgetItem(str(i+j+1)))
+                    self._table.setItem(r, 1, QTableWidgetItem(f"{ev['timestamp']:.3f}"))
+                    ti = QTableWidgetItem(ev["event_type"])
+                    ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
+                    self._table.setItem(r, 2, ti)
+                    self._table.setItem(r, 3, QTableWidgetItem(event_summary(ev)))
+                    self._table.setItem(r, 4, _guard_item(ev))
+                    self._row_event_idx.append(i+j)
+                    self._table.setRowHidden(r, True)
+                i += count
+            else:
+                ev = m.events[i]
+                row = self._table.rowCount(); self._table.insertRow(row)
+                self._table.setItem(row, 0, QTableWidgetItem(str(i+1)))
+                self._table.setItem(row, 1, QTableWidgetItem(f"{ev['timestamp']:.3f}"))
+                ti = QTableWidgetItem(ev["event_type"])
+                ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
+                self._table.setItem(row, 2, ti)
+                self._table.setItem(row, 3, QTableWidgetItem(event_summary(ev)))
+                self._table.setItem(row, 4, _guard_item(ev))
+                self._row_event_idx.append(i)
+                i += 1
+
+        self._table.blockSignals(False)
+        suffix = f"  ({len(groups)} groups)" if groups else ""
+        self._ev_count.setText(f"{len(m.events)} events{suffix}")
+        self._apply_filter()
+
+    def _build_groups(self, events):
+        out, i, N = [], 0, len(events)
+        while i < N:
+            et = events[i]["event_type"]; j = i
+            while j < N and events[j]["event_type"] == et: j += 1
+            if j - i >= self.GROUP_THRESHOLD: out.append((i, j-i, et))
+            i = j
+        return out
+
+    def _apply_filter(self):
+        allowed = {et for et, cb in self._ev_filters.items() if cb.isChecked()}
+        shown = 0
+        for row in range(self._table.rowCount()):
+            if row in self._groups:
+                g = self._groups[row]
+                self._table.setRowHidden(row, g["et"] not in allowed)
+                continue
+            idx = self._row_event_idx[row] if 0 <= row < len(self._row_event_idx) else -1
+            if idx < 0 or idx >= len(self._macro.events): continue
+            ev = self._macro.events[idx]
+            in_collapsed = any(
+                hr < row <= hr + g["count"] and g["collapsed"]
+                for hr, g in self._groups.items())
+            vis = (ev["event_type"] in allowed) and not in_collapsed
+            self._table.setRowHidden(row, not vis)
+            if vis: shown += 1
+
+    def _on_cell_clicked(self, row, col):
+        if row in self._groups:
+            g = self._groups[row]
+            g["collapsed"] = not g["collapsed"]
+            hdr = self._table.item(row, 0)
+            if hdr: hdr.setText(f"{'▶' if g['collapsed'] else '▼'}  ×{g['count']}")
+            allowed = {et for et, cb in self._ev_filters.items() if cb.isChecked()}
+            for offset in range(1, g["count"]+1):
+                r = row+offset
+                if r < self._table.rowCount():
+                    vis = (not g["collapsed"]) and (g["et"] in allowed)
+                    self._table.setRowHidden(r, not vis)
+
+    def _on_guard_item_changed(self, item):
+        if item.column() != 4 or not self._macro: return
+        row = item.row()
+        if row in self._groups: return
+        idx = self._row_event_idx[row] if 0 <= row < len(self._row_event_idx) else -1
+        if idx < 0 or idx >= len(self._macro.events): return
+        self._macro.events[idx]["pixel_guard"] = (
+            item.checkState() == Qt.CheckState.Checked)
+        self.changed.emit(self._macro.id)
+
+    def _on_section_moved(self, logical_idx, old_visual, new_visual):
+        if not self._macro: return
+        order = []
+        vh = self._table.verticalHeader()
+        for vrow in range(self._table.rowCount()):
+            logical = vh.logicalIndex(vrow)
+            ev_idx = self._row_event_idx[logical] if 0 <= logical < len(self._row_event_idx) else -1
+            if ev_idx >= 0: order.append(ev_idx)
+        if not order: return
+        try:
+            self._macro.events = [self._macro.events[i] for i in order]
+        except IndexError: return
+        vh.blockSignals(True)
+        for i in range(self._table.rowCount()): vh.moveSection(vh.visualIndex(i), i)
+        vh.blockSignals(False)
+        self._fill_table()
+        self.changed.emit(self._macro.id)
+
+    def _clear_events(self):
+        if QMessageBox.question(
+            self, "Clear", "Clear all events for this lane?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) == QMessageBox.StandardButton.Yes:
+            self._macro.events = []; self._table.setRowCount(0)
+            self._ev_count.setText("0 events")
+            self.changed.emit(self._macro.id)
+
+    def _del_selected_events(self):
+        idxs = set()
+        for item in self._table.selectedIndexes():
+            r = item.row()
+            if 0 <= r < len(self._row_event_idx):
+                e = self._row_event_idx[r]
+                if e >= 0: idxs.add(e)
+        for e in sorted(idxs, reverse=True):
+            if e < len(self._macro.events): self._macro.events.pop(e)
+        self._fill_table()
+        self.changed.emit(self._macro.id)
+
+    # ── Settings handlers ─────────────────────────────────────────────────────
+
+    def _on_enabled_changed(self, s):
+        self._macro.lane_enabled = bool(s)
+        self.changed.emit(self._macro.id)
+
+    def _on_name_changed(self, text):
+        self._macro.name = text
+        self.changed.emit(self._macro.id)
+
+    def _on_hotkey_changed(self):
+        self._macro.trigger_hotkey = self._hotkey_edit.text().strip()
+        self.changed.emit(self._macro.id)
+
+    def _on_repeat_changed(self, v):
+        self._macro.repeat_count = v
+        self.changed.emit(self._macro.id)
+
+    def _on_speed_changed(self, v):
+        self._macro.speed_multiplier = v
+        self.changed.emit(self._macro.id)
+
+    def _on_move_chk_changed(self, s):
+        self._macro.record_mouse_move = bool(s)
+        self.changed.emit(self._macro.id)
+
+    def _on_use_target_changed(self, s):
+        self._macro.use_target_window = bool(s)
+        self._update_window_btn_states()
+        self._refresh_pid_label()
+        self.changed.emit(self._macro.id)
+
+    def _on_backend_changed(self, idx):
+        self._macro.input_backend = self._backend_combo.itemData(idx) or "auto"
+        self._update_hook_status()
+        self.changed.emit(self._macro.id)
+
+    def _update_window_btn_states(self):
+        en = self._macro.use_target_window
+        for btn in (self._pick_btn, self._capture_btn, self._drag_btn):
+            btn.setEnabled(en)
+
+    def _refresh_pid_label(self):
+        m = self._macro
+        if not m.use_target_window or not m.target_window_title:
+            self._pid_lbl.setText(""); return
+        hwnd = find_window_hwnd(m.target_window_title)
+        if not hwnd:
+            self._pid_lbl.setText("⚠ Window not found"); return
+        pid = get_window_pid(hwnd)
+        try:
+            import psutil; pname = psutil.Process(pid).name()
+        except Exception: pname = ""
+        hook_txt = ""
+        if m.input_backend == "detours":
+            hook_txt = "  Hook: " + ("✓ loaded" if _pipe_exists(pid) else "✗ not loaded")
+        self._pid_lbl.setText(
+            f"PID {pid}  {pname}  HWND 0x{hwnd:08X}{hook_txt}")
+
+    def _update_hook_status(self):
+        m = self._macro
+        if m.input_backend != "detours" or not m.use_target_window:
+            self._hook_status_lbl.setText(""); return
+        hwnd = find_window_hwnd(m.target_window_title) if m.target_window_title else None
+        pid  = get_window_pid(hwnd) if hwnd else 0
+        if pid and _pipe_exists(pid):
+            self._hook_status_lbl.setText("✓ Hook loaded")
+            self._hook_status_lbl.setStyleSheet("color: #a6e3a1; font-size: 12px;")
+        elif pid:
+            self._hook_status_lbl.setText("✗ Not injected")
+            self._hook_status_lbl.setStyleSheet("color: #f38ba8; font-size: 12px;")
+        else:
+            self._hook_status_lbl.setText("✗ Window not found")
+            self._hook_status_lbl.setStyleSheet("color: #fab387; font-size: 12px;")
+
+    def _show_hook_status(self):
+        self._refresh_pid_label()
+        self._update_hook_status()
+        QMessageBox.information(self, "Hook Status",
+            self._pid_lbl.text() or "No target window set.")
+
+    # ── Window capture ────────────────────────────────────────────────────────
+
+    def _pick_window(self, slot: int = 1):
+        from PyQt6.QtWidgets import QDialog, QListWidget, QDialogButtonBox, QVBoxLayout
+        windows = enumerate_windows()
+        if not windows:
+            QMessageBox.information(self, "Pick Window", "No visible windows found.")
+            return
+        dlg = QDialog(self.window()); dlg.setWindowTitle("Pick Target Window")
+        dlg.setMinimumSize(600, 420)
+        v = QVBoxLayout(dlg)
+        lw = QListWidget()
+        lw.setStyleSheet(
+            "QListWidget { background:#181825; border:1px solid #313244; "
+            "border-radius:6px; font-family:Consolas,monospace; }")
+        cur = self._macro.target_window_title
+        for hwnd, pid, title in windows:
+            it = QListWidgetItem(f"0x{hwnd:08X}   PID {pid:>6}   {title}")
+            it.setData(Qt.ItemDataRole.UserRole, (hwnd, pid, title))
+            lw.addItem(it)
+            if title == cur: lw.setCurrentItem(it)
+        lw.itemDoubleClicked.connect(lambda _i: dlg.accept())
+        v.addWidget(lw, 1)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        item = lw.currentItem()
+        if not item: return
+        hwnd, pid, title = item.data(Qt.ItemDataRole.UserRole)
+        self._macro.target_window_title = title
+        self._win_lbl.setText(title)
+        self._refresh_pid_label()
+        self.changed.emit(self._macro.id)
+
+    def _capture_window(self):
+        self._capture_btn.setEnabled(False)
+        self._capture_ctr = 3
+        self._tick_capture()
+
+    def _tick_capture(self):
+        if self._capture_ctr > 0:
+            self._capture_btn.setText(f"Capturing {self._capture_ctr}s…")
+            self._capture_ctr -= 1
+            QTimer.singleShot(1000, self._tick_capture)
+        else:
+            title = get_foreground_title()
+            self._macro.target_window_title = title
+            self._win_lbl.setText(title or "(none)")
+            self._capture_btn.setText("Capture 3s")
+            self._capture_btn.setEnabled(self._macro.use_target_window)
+            self._refresh_pid_label()
+            self.changed.emit(self._macro.id)
+
+    def _start_drag_pick(self, slot: int):
+        parent_win = self.window()
+        parent_win.showMinimized()
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout
+        hint = QDialog(parent_win)
+        hint.setWindowFlags(
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        lbl = QLabel(f"  🎯  Click any window to set as target for lane '{self._macro.name}'.\n  ESC to cancel.  ")
+        lbl.setStyleSheet(
+            "background:#313244;color:#cdd6f4;font-size:14px;padding:18px;"
+            "border:2px solid #89b4fa;border-radius:8px;")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        QVBoxLayout(hint).addWidget(lbl)
+        hint.adjustSize(); hint.move(100, 100); hint.show()
+        result: list = [None]
+        def _on_click(x, y, button, pressed):
+            if not pressed or button != ms_lib.Button.left: return
+            hwnd = _u32.WindowFromPoint(ctypes.wintypes.POINT(int(x), int(y)))
+            while True:
+                p = _u32.GetParent(hwnd)
+                if not p: break
+                hwnd = p
+            n = _u32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n+1)
+                _u32.GetWindowTextW(hwnd, buf, n+1)
+                result[0] = buf.value
+            ml.stop(); return False
+        def _on_key(key):
+            if key == Key.esc: ml.stop()
+            return False
+        ml = ms_lib.Listener(on_click=_on_click)
+        kl = kb_lib.Listener(on_press=_on_key)
+        def _wait():
+            ml.join(); kl.stop(); QTimer.singleShot(0, _done)
+        def _done():
+            hint.close()
+            parent_win.showNormal(); parent_win.raise_(); parent_win.activateWindow()
+            if result[0]:
+                self._macro.target_window_title = result[0]
+                self._win_lbl.setText(result[0])
+                self._refresh_pid_label()
+                self.changed.emit(self._macro.id)
+        ml.start(); kl.start()
+        threading.Thread(target=_wait, daemon=True).start()
+
+    # ── Guard handlers ────────────────────────────────────────────────────────
+
+    def _on_guard_enabled_changed(self, s):
+        self._macro.pixel_guard_enabled = bool(s)
+        self.changed.emit(self._macro.id)
+
+    def _on_guard_flags_changed(self):
+        raw = self._guard_flags_edit.text()
+        self._macro.pixel_guard_red_flags = [f.strip() for f in raw.split(",") if f.strip()]
+        self.changed.emit(self._macro.id)
+
+    def _on_guard_key_changed(self):
+        self._macro.pixel_guard_correction_key = self._guard_key_edit.text().strip() or "b"
+        self.changed.emit(self._macro.id)
+
+    def _on_guard_macro_changed(self, _):
+        self._macro.pixel_guard_correction_macro = self._guard_macro_combo.currentData() or ""
+        self.changed.emit(self._macro.id)
+
+    def _on_guard_cap_changed(self):
+        self._macro.pixel_guard_cap_x_pct = self._guard_cap_x_spin.value()
+        self._macro.pixel_guard_cap_y_pct = self._guard_cap_y_spin.value()
+        self._macro.pixel_guard_cap_w_pct = self._guard_cap_w_spin.value()
+        self._macro.pixel_guard_cap_h_pct = self._guard_cap_h_spin.value()
+        self.changed.emit(self._macro.id)
+
+    def _test_ocr(self):
+        m = self._macro
+        hwnd = find_window_hwnd(m.target_window_title) if (
+            m.use_target_window and m.target_window_title) else None
+        text = _pixel_ocr_region(hwnd,
+            self._guard_cap_x_spin.value(), self._guard_cap_y_spin.value(),
+            self._guard_cap_w_spin.value(), self._guard_cap_h_spin.value())
+        matched = _pixel_flags_match(text, getattr(m, "pixel_guard_red_flags", []))
+        color = "#f38ba8" if matched else "#a6e3a1"
+        result = (f"OCR: '{text or '(empty)'}'\n" +
+                  (f"🚩 Matched: '{matched}'" if matched else "✓ No flags matched."))
+        msg = QMessageBox(self.window())
+        msg.setWindowTitle("OCR Test")
+        msg.setText(f"<span style='color:{color}'>{result}</span>")
+        msg.exec()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN WINDOW
 # ══════════════════════════════════════════════════════════════════════════════
 
 class MainWindow(QMainWindow):
 
-    # ── Init ──────────────────────────────────────────────────────────────────
-
-    # Cross-thread signal: pynput global hotkeys fire on a worker thread, but
-    # Qt actions must run on the GUI thread.  We marshal via this signal.
     _global_shortcut_sig = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"QytCroRec v{__version__}")
-        self.resize(1000, 700)
-        self.setMinimumSize(780, 520)
+        self.resize(1200, 750)
+        self.setMinimumSize(900, 560)
 
-        self._storage  = Storage()
-        self._macros: list[Macro]               = self._storage.load_macros()
-        self._sc_config: dict[str, str]         = self._storage.load_shortcuts()
-        self._current:   Optional[Macro]        = None
-        self._recorder:  Optional[RecorderThread] = None
-        self._players:   dict[str, PlayerThread]  = {}
-        self._qtshortcuts:  dict[str, QShortcut] = {}
-        self._shortcut_btns: dict[str, list[QPushButton]] = {}  # action_id → buttons w/ dynamic tooltips
-        self._recording   = False
-        self._deleted_macro: Optional[Macro] = None   # undo buffer for last deleted macro
-        self._capture_ctr = 0
-        self._play_failure_msg: dict[str, str] = {}    # macro_id → persistent error
-        self._row_event_idx: list = []                 # table_row → event_idx (or -1 = group header)
-        self._groups: dict = {}                        # header_row → {start,count,et,collapsed}
-
-        # Two hotkey managers — one for per-macro triggers, one for global app shortcuts
-        self._hotkeys     = HotkeyManager(self._hotkey_fired)            # macro triggers (payload = macro id)
-        self._app_hotkeys = HotkeyManager(self._app_hotkey_fired_raw)    # app shortcuts  (payload = action id)
-        self._global_shortcut_sig.connect(self._app_hotkey_fired_gui)    # marshal to GUI thread
-
-        self._build_ui()
-        # Shortcuts are wired after all widgets exist
-        self._apply_shortcuts()
-        self.setStyleSheet(STYLE)
-        self._refresh_list()
-        if self._macros:
-            self._macro_list.setCurrentRow(0)
-
-        self._autosave    = QTimer(timeout=lambda: self._storage.save_macros(self._macros))
-        self._autosave.start(30_000)
+        self._storage      = Storage()
+        self._groups: list[MacroGroup]            = self._storage.load_groups()
+        self._sc_config: dict[str, str]           = self._storage.load_shortcuts()
+        self._cur_group: Optional[MacroGroup]     = None
+        self._lane_widgets: list[LaneWidget]      = []   # [primary, sec1, sec2]
+        self._recorders: dict[str, RecorderThread]= {}   # macro_id → recorder
+        self._chain_players: dict[str, ChainPlayerThread] = {}  # group_id → chain player
+        self._qtshortcuts:   dict[str, QShortcut] = {}
+        self._shortcut_btns: dict[str, list[QPushButton]] = {}
+        self._play_failure_msg: dict[str, str]    = {}
+        self._deleted_group: Optional[MacroGroup] = None
         self._flash_timer = QTimer(timeout=self._flash_record_btn)
         self._flash_state = False
+        self._play_start_times: dict = {}
+        self._recording_lane: Optional[str] = None   # macro id currently recording
+
+        # Ensure every group has 3 lanes
+        for g in self._groups:
+            g.ensure_lanes()
+        if not self._groups:
+            self._groups.append(self._new_group_obj("Group 1"))
+
+        self._hotkeys     = HotkeyManager(self._hotkey_fired)
+        self._app_hotkeys = HotkeyManager(self._app_hotkey_fired_raw)
+        self._global_shortcut_sig.connect(self._app_hotkey_fired_gui)
+
+        self._build_ui()
+        self._apply_shortcuts()
+        self.setStyleSheet(STYLE)
+        self._refresh_group_list()
+        self._group_list.setCurrentRow(0)
+
+        self._autosave = QTimer(timeout=self._autosave_fn)
+        self._autosave.start(30_000)
+        self._runtime_timer = QTimer(timeout=self._tick_runtime)
 
         self._setup_tray()
         self._rebuild_hotkeys()
         self._update_active_label()
 
         if AUTO_UPDATE_ENABLED:
-            # Run on a worker thread so startup isn't blocked by network
             threading.Thread(target=self._check_for_updates, daemon=True).start()
+
+    def _autosave_fn(self):
+        self._storage.save_groups(self._groups)
+
+    def _all_macros(self) -> list:
+        out = []
+        for g in self._groups:
+            out.extend(g.lanes)
+        return out
 
     # ══════════════════════════════════════════════════════════════════════════
     # SECTION: Keyboard Shortcuts
@@ -1831,19 +3027,18 @@ class MainWindow(QMainWindow):
     #   The Shortcuts tab lets the user edit _sc_config live.
     # ══════════════════════════════════════════════════════════════════════════
 
-    # Map action id → callable
     def _shortcut_actions(self) -> dict:
         return {
-            "new_macro":      self._new_macro,
-            "dup_macro":      self._dup_macro,
-            "del_macro":      self._del_macro,
+            "new_macro":      self._new_group,
+            "dup_macro":      self._dup_group,
+            "del_macro":      self._del_group,
             "undo_delete":    self._undo_delete,
             "toggle_record":  self._toggle_record,
-            "play":           self._play_current,
-            "stop":           self._stop_current,
+            "play":           self._play_chain,
+            "stop":           lambda: None,   # individual lane stop via lane btn
             "stop_all":       self._stop_all,
-            "clear_events":   self._clear_events,
-            "capture_window": self._capture_window,
+            "clear_events":   self._del_events_if_focused,
+            "capture_window": lambda: None,
             "del_events":     self._del_events_if_focused,
         }
 
@@ -1911,7 +3106,8 @@ class MainWindow(QMainWindow):
     # ── Auto-update ───────────────────────────────────────────────────────────
 
     def _check_for_updates(self):
-        upd = AutoUpdater(__version__, UPDATE_VERSION_URL, UPDATE_SCRIPT_URL)
+        upd = AutoUpdater(__version__, UPDATE_VERSION_URL, UPDATE_SCRIPT_URL,
+                          exe_url=UPDATE_EXE_URL)
         info = upd.check()
         if not info: return
         # Marshal the prompt to the GUI thread
@@ -1932,22 +3128,35 @@ class MainWindow(QMainWindow):
         msg.button(QMessageBox.StandardButton.No ).setText("Later")
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
-        target = Path(__file__).resolve()
-        if upd.download_and_install(target):
-            self._set_status("Update installed — restarting…", "#a6e3a1")
+        self._set_status("Downloading update…", "#f9e2af")
+        # Run download off the GUI thread so UI doesn't freeze
+        def _do_download():
+            target = Path(__file__).resolve()
+            ok = upd.download_and_install(target)
+            QTimer.singleShot(0, lambda: self._on_update_done(ok, upd))
+        threading.Thread(target=_do_download, daemon=True).start()
+
+    def _on_update_done(self, ok: bool, upd: "AutoUpdater"):
+        if ok:
+            self._set_status("Update downloaded — restarting…", "#a6e3a1")
             QTimer.singleShot(600, self._restart_app)
         else:
             QMessageBox.warning(self, "Update Failed",
-                "Could not install the update.  See console for details.")
+                "Could not download the update.  See console for details.")
 
     def _restart_app(self):
-        """Relaunch the script and quit this instance."""
+        """Relaunch and quit this instance.  Handles both exe and script mode."""
         self._storage.save_macros(self._macros)
-        try:
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve())])
-        except Exception as e:
-            print(f"Restart failed: {e}")
-        QApplication.quit()
+        if getattr(sys, "frozen", False):
+            # Exe mode: batch swap script already launched by AutoUpdater —
+            # just quit so the batch can overwrite the exe while it's not running.
+            QApplication.quit()
+        else:
+            try:
+                subprocess.Popen([sys.executable, str(Path(__file__).resolve())])
+            except Exception as e:
+                print(f"Restart failed: {e}")
+            QApplication.quit()
 
     # ── Misc ─────────────────────────────────────────────────────────────────
 
@@ -1965,18 +3174,26 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root_w)
         root = QVBoxLayout(root_w)
         root.setContentsMargins(10, 10, 10, 8)
-        root.setSpacing(8)
+        root.setSpacing(6)
 
         root.addLayout(self._build_topbar())
 
-        sp = QSplitter(Qt.Orientation.Horizontal)
-        sp.setHandleWidth(1)
-        sp.addWidget(self._build_left())
-        sp.addWidget(self._build_right_tabs())
-        sp.setSizes([210, 790])
-        sp.setStretchFactor(0, 0)
-        sp.setStretchFactor(1, 1)
-        root.addWidget(sp)
+        # Main splitter: groups list | lane tabs
+        main_sp = QSplitter(Qt.Orientation.Horizontal)
+        main_sp.setHandleWidth(1)
+        main_sp.addWidget(self._build_left())
+        main_sp.addWidget(self._build_center())
+        main_sp.setSizes([200, 1000])
+        main_sp.setStretchFactor(0, 0)
+        main_sp.setStretchFactor(1, 1)
+
+        # Vertical splitter: main area | shared log
+        vert_sp = QSplitter(Qt.Orientation.Vertical)
+        vert_sp.setHandleWidth(3)
+        vert_sp.addWidget(main_sp)
+        vert_sp.addWidget(self._build_log_pane())
+        vert_sp.setSizes([600, 140])
+        root.addWidget(vert_sp, 1)
 
         root.addLayout(self._build_controls())
 
@@ -1990,70 +3207,93 @@ class MainWindow(QMainWindow):
         sb.addWidget(self._status)
         sb.addPermanentWidget(self._runtime_lbl)
         sb.addPermanentWidget(self._active_lbl)
-        # Ticks every 200ms to update the runtime label during playback
-        self._play_start_times: dict = {}
-        self._runtime_timer = QTimer(timeout=self._tick_runtime)
 
     def _build_topbar(self) -> QHBoxLayout:
         row = QHBoxLayout(); row.setSpacing(6)
-        btn_new = QPushButton("＋  New")
-        btn_dup = QPushButton("⎘  Duplicate")
-        btn_del = QPushButton("✕  Delete"); btn_del.setObjectName("btn_del")
-        btn_new.clicked.connect(self._new_macro)
-        btn_dup.clicked.connect(self._dup_macro)
-        btn_del.clicked.connect(self._del_macro)
-        # Register for dynamic tooltips — hover shows the current keybind
-        self._register_btn("new_macro", btn_new, "New macro")
-        self._register_btn("dup_macro", btn_dup, "Duplicate macro")
-        self._register_btn("del_macro", btn_del, "Delete macro")
+        btn_new = QPushButton("＋ New Group")
+        btn_dup = QPushButton("⎘ Duplicate")
+        btn_del = QPushButton("✕ Delete"); btn_del.setObjectName("btn_del")
+        btn_new.clicked.connect(self._new_group)
+        btn_dup.clicked.connect(self._dup_group)
+        btn_del.clicked.connect(self._del_group)
+        self._register_btn("new_macro", btn_new, "New group")
+        self._register_btn("dup_macro", btn_dup, "Duplicate group")
+        self._register_btn("del_macro", btn_del, "Delete group")
         for b in (btn_new, btn_dup, btn_del): row.addWidget(b)
         row.addStretch()
-        # ── Log copy buttons ─────────────────────────────────────────────────
-        _diag_log_path  = Path.home() / ".macro_recorder" / "dll_hook.log"
-        _crash_log_path = _CRASH_LOG_PATH
-
         btn_diag = QPushButton("📋 Diag Log")
-        btn_diag.setToolTip(f"Copy diagnostic log to clipboard\n{_diag_log_path}")
         btn_diag.setStyleSheet(
-            "QPushButton { background: #313244; color: #a6adc8; "
-            "border: 1px solid #45475a; border-radius: 5px; padding: 4px 10px; font-size: 12px; }"
-            "QPushButton:hover { background: #45475a; color: #cdd6f4; }")
+            "QPushButton{background:#313244;color:#a6adc8;border:1px solid #45475a;"
+            "border-radius:5px;padding:4px 10px;font-size:12px;}"
+            "QPushButton:hover{background:#45475a;color:#cdd6f4;}")
         btn_diag.clicked.connect(self._copy_diag_log)
         row.addWidget(btn_diag)
-
         btn_crash = QPushButton("📋 Crash Log")
-        btn_crash.setToolTip(f"Copy crash log to clipboard\n{_crash_log_path}")
         btn_crash.setStyleSheet(
-            "QPushButton { background: #313244; color: #f38ba8; "
-            "border: 1px solid #45475a; border-radius: 5px; padding: 4px 10px; font-size: 12px; }"
-            "QPushButton:hover { background: #45475a; color: #f5a3bb; }")
+            "QPushButton{background:#313244;color:#f38ba8;border:1px solid #45475a;"
+            "border-radius:5px;padding:4px 10px;font-size:12px;}"
+            "QPushButton:hover{background:#45475a;color:#f5a3bb;}")
         btn_crash.clicked.connect(self._copy_crash_log)
         row.addWidget(btn_crash)
-
         row.addSpacing(12)
         title = QLabel(f"QytCroRec v{__version__}")
-        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #89b4fa;")
+        title.setStyleSheet("font-size:16px;font-weight:bold;color:#89b4fa;")
         row.addWidget(title)
         return row
 
     def _build_left(self) -> QWidget:
-        w = QWidget(); w.setMinimumWidth(170); w.setMaximumWidth(250)
+        w = QWidget(); w.setMinimumWidth(170); w.setMaximumWidth(230)
         lay = QVBoxLayout(w); lay.setContentsMargins(0, 0, 6, 0); lay.setSpacing(4)
-        hdr = QLabel("MACROS")
-        hdr.setStyleSheet("color: #585b70; font-size: 11px; font-weight: bold; padding: 2px 0;")
+        hdr = QLabel("MACRO GROUPS")
+        hdr.setStyleSheet("color:#585b70;font-size:11px;font-weight:bold;padding:2px 0;")
         lay.addWidget(hdr)
-        self._macro_list = QListWidget()
-        self._macro_list.currentRowChanged.connect(self._on_row_changed)
-        lay.addWidget(self._macro_list)
+        self._group_list = QListWidget()
+        self._group_list.currentRowChanged.connect(self._on_group_row_changed)
+        lay.addWidget(self._group_list)
         return w
 
-    def _build_right_tabs(self) -> QTabWidget:
-        tabs = QTabWidget()
-        tabs.addTab(self._build_tab_macro(),     "⚙  Macro")
-        tabs.addTab(self._build_tab_events(),    "⏺  Events")
-        tabs.addTab(self._build_tab_guard(),     "🛡  Guard")
-        tabs.addTab(self._build_tab_shortcuts(), "⌨  Shortcuts")
-        return tabs
+    def _build_center(self) -> QWidget:
+        """Stacked widget: lane tabs per group, plus Shortcuts tab."""
+        w = QWidget()
+        lay = QVBoxLayout(w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+
+        # Lane tab widget (Primary | Lane 2 | Lane 3 | ⌨ Shortcuts)
+        self._lane_tabs = QTabWidget()
+        self._lane_tabs.setStyleSheet(
+            "QTabBar::tab { padding:7px 20px; font-size:13px; }"
+            "QTabBar::tab:selected { background:#313244; color:#cdd6f4; }")
+        # Placeholder lane widgets — replaced when a group is selected
+        for i, label in enumerate(["⭐ Primary", "➕ Lane 2", "➕ Lane 3"]):
+            placeholder = QWidget()
+            self._lane_tabs.addTab(placeholder, label)
+        self._lane_tabs.addTab(self._build_tab_shortcuts(), "⌨ Shortcuts")
+        lay.addWidget(self._lane_tabs)
+        return w
+
+    def _build_log_pane(self) -> QWidget:
+        from PyQt6.QtWidgets import QTextEdit
+        w = QWidget()
+        lay = QVBoxLayout(w); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(2)
+        hdr = QHBoxLayout()
+        lbl = QLabel("Activity Log")
+        lbl.setStyleSheet("color:#585b70;font-size:11px;font-weight:bold;")
+        hdr.addWidget(lbl)
+        btn_clear = QPushButton("Clear"); btn_clear.setMaximumWidth(60)
+        btn_clear.setStyleSheet(
+            "QPushButton{background:#313244;color:#a6adc8;border:1px solid #45475a;"
+            "border-radius:4px;padding:2px 8px;font-size:11px;}"
+            "QPushButton:hover{background:#45475a;}")
+        btn_clear.clicked.connect(lambda: self._log.clear())
+        hdr.addWidget(btn_clear); hdr.addStretch()
+        lay.addLayout(hdr)
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMaximumHeight(200)
+        self._log.setStyleSheet(
+            "QTextEdit{background:#181825;border:1px solid #313244;border-radius:4px;"
+            "font-family:Consolas,monospace;font-size:11px;color:#a6adc8;padding:4px;}")
+        lay.addWidget(self._log)
+        return w
 
     # ── Tab: Macro settings ───────────────────────────────────────────────────
 
@@ -2548,32 +3788,25 @@ class MainWindow(QMainWindow):
     def _build_controls(self) -> QHBoxLayout:
         row = QHBoxLayout(); row.setSpacing(8)
 
-        self._btn_record = QPushButton("⏺  Record")
-        self._btn_record.setObjectName("btn_record"); self._btn_record.setMinimumWidth(120)
-        self._btn_record.clicked.connect(self._toggle_record)
-        self._register_btn("toggle_record", self._btn_record, "Start / stop recording")
+        self._btn_play_chain = QPushButton("▶▶  Play Chain")
+        self._btn_play_chain.setObjectName("btn_play")
+        self._btn_play_chain.setMinimumWidth(130)
+        self._btn_play_chain.setToolTip(
+            "Run Primary → Lane 2 → Lane 3 in sequence.\n"
+            "Repeats according to Primary's repeat setting.")
+        self._btn_play_chain.clicked.connect(self._play_chain)
+        self._register_btn("play", self._btn_play_chain, "Play chain (all lanes)")
 
-        self._btn_play = QPushButton("▶  Play")
-        self._btn_play.setObjectName("btn_play"); self._btn_play.setMinimumWidth(90)
-        self._btn_play.clicked.connect(self._play_current)
-        self._register_btn("play", self._btn_play, "Play selected macro")
-
-        self._btn_stop = QPushButton("■  Stop")
-        self._btn_stop.setObjectName("btn_stop"); self._btn_stop.setMinimumWidth(90)
-        self._btn_stop.setEnabled(False)
-        self._btn_stop.clicked.connect(self._stop_current)
-        self._register_btn("stop", self._btn_stop, "Stop current macro")
-
-        self._btn_stop_all = QPushButton("Stop All")
+        self._btn_stop_all = QPushButton("■  Stop All")
+        self._btn_stop_all.setObjectName("btn_stop")
         self._btn_stop_all.setEnabled(False)
         self._btn_stop_all.clicked.connect(self._stop_all)
-        self._register_btn("stop_all", self._btn_stop_all, "Stop all running macros")
+        self._register_btn("stop_all", self._btn_stop_all, "Stop all running chains")
 
-        for b in (self._btn_record, self._btn_play, self._btn_stop, self._btn_stop_all):
+        for b in (self._btn_play_chain, self._btn_stop_all):
             row.addWidget(b)
         row.addStretch()
 
-        # Show current shortcuts as a reminder
         sc_hint = QLabel()
         sc_hint.setStyleSheet("color: #45475a; font-size: 11px;")
         def _update_hint():
@@ -2581,13 +3814,127 @@ class MainWindow(QMainWindow):
             sc_hint.setText(
                 f"Rec: {sc.get('toggle_record','?')}   "
                 f"Play: {sc.get('play','?')}   "
-                f"Stop: {sc.get('stop','?')}   "
-                f"Stop All: {sc.get('stop_all','?')}"
-            )
+                f"Stop All: {sc.get('stop_all','?')}")
         _update_hint()
         self._sc_hint_updater = _update_hint
         row.addWidget(sc_hint)
         return row
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION: Group Management
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _new_group_obj(self, name: str = "New Group") -> MacroGroup:
+        g = MacroGroup(name=name)
+        g.ensure_lanes()
+        return g
+
+    def _new_group(self):
+        g = self._new_group_obj(f"Group {len(self._groups)+1}")
+        self._groups.append(g)
+        self._refresh_group_list()
+        self._group_list.setCurrentRow(len(self._groups)-1)
+        self._storage.save_groups(self._groups)
+
+    def _dup_group(self):
+        if not self._cur_group: return
+        import copy
+        g2 = copy.deepcopy(self._cur_group)
+        g2.id = str(uuid.uuid4())
+        g2.name = f"{g2.name} (copy)"
+        for lane in g2.lanes:
+            lane.id = str(uuid.uuid4())
+        self._groups.append(g2)
+        self._refresh_group_list()
+        self._group_list.setCurrentRow(len(self._groups)-1)
+        self._storage.save_groups(self._groups)
+
+    def _del_group(self):
+        if not self._cur_group: return
+        if QMessageBox.question(
+            self, "Delete", f"Delete group '{self._cur_group.name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes: return
+        gid = self._cur_group.id
+        if gid in self._chain_players:
+            self._chain_players[gid].stop()
+        self._deleted_group = self._cur_group
+        self._groups = [g for g in self._groups if g.id != gid]
+        self._cur_group = None
+        if not self._groups:
+            self._groups.append(self._new_group_obj("Group 1"))
+        self._refresh_group_list()
+        self._group_list.setCurrentRow(0)
+        self._storage.save_groups(self._groups)
+        self._set_status(f"Deleted '{self._deleted_group.name}' — Ctrl+Z to undo", "#fab387")
+
+    def _undo_delete(self):
+        if not self._deleted_group: return
+        self._groups.append(self._deleted_group)
+        self._deleted_group = None
+        self._refresh_group_list()
+        self._group_list.setCurrentRow(len(self._groups)-1)
+        self._storage.save_groups(self._groups)
+        self._set_status("Delete undone.", "#a6e3a1")
+
+    def _refresh_group_list(self):
+        self._group_list.blockSignals(True)
+        cur_id = self._cur_group.id if self._cur_group else None
+        self._group_list.clear(); restore = 0
+        for i, g in enumerate(self._groups):
+            playing = g.id in self._chain_players
+            item = QListWidgetItem(f"{'▶ ' if playing else '   '}{g.name}")
+            item.setData(Qt.ItemDataRole.UserRole, g.id)
+            if playing: item.setForeground(QColor("#a6e3a1"))
+            self._group_list.addItem(item)
+            if g.id == cur_id: restore = i
+        self._group_list.blockSignals(False)
+        if self._groups: self._group_list.setCurrentRow(restore)
+
+    def _on_group_row_changed(self, row: int):
+        if 0 <= row < len(self._groups):
+            self._load_group(self._groups[row])
+
+    def _load_group(self, g: MacroGroup):
+        self._cur_group = g
+        g.ensure_lanes()
+        # Rebuild the lane tabs for this group
+        # Keep shortcuts tab (index 3)
+        shortcuts_widget = self._lane_tabs.widget(3)
+        # Remove lane tabs (indices 0,1,2)
+        while self._lane_tabs.count() > 1:
+            self._lane_tabs.removeTab(0)
+        # Remove shortcuts too, we'll re-add it
+        self._lane_tabs.removeTab(0)
+
+        self._lane_widgets = []
+        lane_labels = ["⭐ Primary", "➕ Lane 2", "➕ Lane 3"]
+        for i, lane in enumerate(g.lanes):
+            lw = LaneWidget(
+                macro=lane,
+                lane_index=i,
+                all_macros_fn=self._all_macros,
+                parent=self)
+            lw.changed.connect(lambda mid: self._on_lane_changed())
+            lw.record_req.connect(self._on_record_req)
+            lw.play_req.connect(self._on_lane_play_req)
+            lw.stop_req.connect(self._on_lane_stop_req)
+            self._lane_widgets.append(lw)
+            self._lane_tabs.addTab(lw, lane_labels[i])
+
+        self._lane_tabs.addTab(shortcuts_widget, "⌨ Shortcuts")
+        self._lane_tabs.setCurrentIndex(0)
+        self._rebuild_hotkeys()
+        self._update_play_btns()
+
+    def _on_lane_changed(self):
+        self._storage.save_groups(self._groups)
+        self._rebuild_hotkeys()
+        # Refresh group name from primary lane name if group name matches default
+        if self._cur_group and self._lane_widgets:
+            pname = self._lane_widgets[0].macro.name
+            # Sync group list item display
+            self._refresh_group_list()
 
     # ══════════════════════════════════════════════════════════════════════════
     # SECTION: System Tray
@@ -2611,598 +3958,20 @@ class MainWindow(QMainWindow):
             lambda r: self.show() if r == QSystemTrayIcon.ActivationReason.DoubleClick else None)
         self._tray.show()
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION: Macro List
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _refresh_list(self):
-        self._macro_list.blockSignals(True)
-        cur_id = self._current.id if self._current else None
-        self._macro_list.clear(); restore = 0
-        for i, m in enumerate(self._macros):
-            playing = m.id in self._players
-            item = QListWidgetItem(f"{'▶ ' if playing else '   '}{m.name}")
-            item.setData(Qt.ItemDataRole.UserRole, m.id)
-            if playing: item.setForeground(QColor("#a6e3a1"))
-            self._macro_list.addItem(item)
-            if m.id == cur_id: restore = i
-        self._macro_list.blockSignals(False)
-        if self._macros: self._macro_list.setCurrentRow(restore)
-
-    def _on_row_changed(self, row: int):
-        if 0 <= row < len(self._macros): self._load_macro(self._macros[row])
-
-    def _on_guard_item_changed(self, item: "QTableWidgetItem"):
-        """Save pixel_guard flag when user checks/unchecks the 🛡 column."""
-        if item.column() != 4: return
-        if not self._current: return
-        row = item.row()
-        if row in self._groups: return   # group-header row — no event behind it
-        idx = self._row_event_idx[row] if 0 <= row < len(self._row_event_idx) else -1
-        if idx < 0 or idx >= len(self._current.events): return
-        self._current.events[idx]["pixel_guard"] = (
-            item.checkState() == Qt.CheckState.Checked)
-        self._storage.save_macros(self._macros)
-
-    def _load_macro(self, m: Macro):
-        self._current = m
-        for w, v in [(self._name_edit, m.name), (self._hotkey_edit, m.trigger_hotkey)]:
-            w.blockSignals(True); w.setText(v); w.blockSignals(False)
-        for w, v in [(self._repeat_spin, m.repeat_count), (self._speed_spin, m.speed_multiplier)]:
-            w.blockSignals(True); w.setValue(v); w.blockSignals(False)
-        for w, v in [(self._move_chk, m.record_mouse_move),
-                     (self._use_target_chk, m.use_target_window)]:
-            w.blockSignals(True); w.setChecked(v); w.blockSignals(False)
-        self._win_title_lbl .setText(m.target_window_title or "(none)")
-        self._win2_title_lbl.setText(getattr(m, "target_window_2", "") or "(none)")
-        self._win3_title_lbl.setText(getattr(m, "target_window_3", "") or "(none)")
-        en = m.use_target_window
-        for btn in (self._capture_btn, self._pick_btn, self._drag_pick_btn1,
-                    self._pick_btn2, self._clear_btn2, self._drag_pick_btn2,
-                    self._pick_btn3, self._clear_btn3, self._drag_pick_btn3):
-            btn.setEnabled(en)
-        # Load backend selection
-        idx = next((i for i, (name, _, _) in enumerate(BACKEND_CHOICES)
-                    if name == (m.input_backend or "auto")), 0)
-        self._backend_combo.blockSignals(True)
-        self._backend_combo.setCurrentIndex(idx)
-        self._backend_combo.blockSignals(False)
-        # ── Pixel Guard tab ──────────────────────────────────────────────────
-        self._guard_enabled_chk.blockSignals(True)
-        self._guard_enabled_chk.setChecked(getattr(m, "pixel_guard_enabled", False))
-        self._guard_enabled_chk.blockSignals(False)
-        self._guard_flags_edit.blockSignals(True)
-        self._guard_flags_edit.setText(
-            ", ".join(getattr(m, "pixel_guard_red_flags", [])))
-        self._guard_flags_edit.blockSignals(False)
-        self._guard_key_edit.blockSignals(True)
-        self._guard_key_edit.setText(getattr(m, "pixel_guard_correction_key", "b") or "b")
-        self._guard_key_edit.blockSignals(False)
-        for attr, sp_name, default in [
-            ("pixel_guard_cap_x_pct", "_guard_cap_x_spin", 0.75),
-            ("pixel_guard_cap_y_pct", "_guard_cap_y_spin", 0.02),
-            ("pixel_guard_cap_w_pct", "_guard_cap_w_spin", 0.24),
-            ("pixel_guard_cap_h_pct", "_guard_cap_h_spin", 0.06),
-        ]:
-            sp = getattr(self, sp_name)
-            sp.blockSignals(True)
-            sp.setValue(getattr(m, attr, default))
-            sp.blockSignals(False)
-        self._reload_guard_macro_combo(m)
-        self._fill_table(m)
-        self._update_play_btns()
-
-    def _reload_guard_macro_combo(self, m: Optional[Macro] = None):
-        """Rebuild the correction-macro dropdown from the current macros list."""
-        m = m or self._current
-        combo = self._guard_macro_combo
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("(none — use key press)", "")
-        cur_id = getattr(m, "pixel_guard_correction_macro", "") if m else ""
-        sel = 0
-        for i2, mac in enumerate(self._macros, start=1):
-            if m and mac.id == m.id: continue   # can't use itself as correction
-            combo.addItem(mac.name, mac.id)
-            if mac.id == cur_id:
-                sel = i2
-        combo.setCurrentIndex(sel)
-        combo.blockSignals(False)
-
-    GROUP_THRESHOLD = 3   # collapse consecutive same-type runs of >=N events
-
-    def _build_event_groups(self, events: list) -> list:
-        """
-        Return [(start_idx, count, event_type), …] for consecutive runs of
-        the same event_type with length >= GROUP_THRESHOLD.
-        """
-        out, i, N = [], 0, len(events)
-        while i < N:
-            et = events[i]["event_type"]
-            j = i
-            while j < N and events[j]["event_type"] == et:
-                j += 1
-            if j - i >= self.GROUP_THRESHOLD:
-                out.append((i, j - i, et))
-            i = j
-        return out
-
-    def _fill_table(self, m: Macro):
-        """
-        Populate the events table.  Consecutive same-type runs become a
-        collapsible group header (▶/▼) followed by the individual rows
-        (hidden when collapsed).  Click the header row's '#' cell to toggle.
-        """
-        # Block signals during bulk population so drag-move handlers don't fire
-        self._table.blockSignals(True)
-        self._table.setRowCount(0)
-        # State tracked per table:
-        #   self._row_event_idx[row] = event index, or -1 for a group-header row
-        #   self._groups[header_row] = {'start': event_idx, 'count': n, 'et': str, 'collapsed': bool}
-        self._row_event_idx: list = []
-        self._groups: dict = {}
-
-        groups = self._build_event_groups(m.events)
-        groups_by_start = {g[0]: g for g in groups}
-
-        def _guard_item(ev_dict: dict) -> QTableWidgetItem:
-            """Return a checkable 🛡 item reflecting ev_dict['pixel_guard']."""
-            it = QTableWidgetItem()
-            it.setFlags(Qt.ItemFlag.ItemIsEnabled |
-                        Qt.ItemFlag.ItemIsSelectable |
-                        Qt.ItemFlag.ItemIsUserCheckable)
-            it.setCheckState(
-                Qt.CheckState.Checked if ev_dict.get("pixel_guard") else Qt.CheckState.Unchecked)
-            it.setToolTip("Check to run Pixel Bot OCR guard before this event")
-            return it
-
-        def _guard_header_item() -> QTableWidgetItem:
-            """Non-interactive placeholder for group-header rows."""
-            it = QTableWidgetItem("—")
-            it.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it.setForeground(QColor("#45475a"))
-            return it
-
-        i = 0
-        while i < len(m.events):
-            if i in groups_by_start:
-                start, count, et = groups_by_start[i]
-                row = self._table.rowCount()
-                self._table.insertRow(row)
-                hdr = QTableWidgetItem(f"▶  ×{count}")
-                hdr.setForeground(QColor(EVENT_COLORS.get(et, "#cdd6f4")))
-                hdr.setBackground(QColor("#252535"))
-                hdr.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                self._table.setItem(row, 0, hdr)
-                t0 = m.events[start]["timestamp"]; t1 = m.events[start + count - 1]["timestamp"]
-                self._table.setItem(row, 1, QTableWidgetItem(f"{t0:.3f}—{t1:.3f}"))
-                tit = QTableWidgetItem(et)
-                tit.setForeground(QColor(EVENT_COLORS.get(et, "#cdd6f4")))
-                self._table.setItem(row, 2, tit)
-                self._table.setItem(row, 3, QTableWidgetItem(
-                    f"({count} similar events — click ▶ to expand)"))
-                self._table.setItem(row, 4, _guard_header_item())
-                self._row_event_idx.append(-1)
-                self._groups[row] = {"start": start, "count": count,
-                                     "et": et, "collapsed": True}
-                for j in range(count):
-                    ev = m.events[i + j]
-                    r = self._table.rowCount()
-                    self._table.insertRow(r)
-                    self._table.setItem(r, 0, QTableWidgetItem(str(i + j + 1)))
-                    self._table.setItem(r, 1, QTableWidgetItem(f"{ev['timestamp']:.3f}"))
-                    ti = QTableWidgetItem(ev["event_type"])
-                    ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
-                    self._table.setItem(r, 2, ti)
-                    self._table.setItem(r, 3, QTableWidgetItem(event_summary(ev)))
-                    self._table.setItem(r, 4, _guard_item(ev))
-                    self._row_event_idx.append(i + j)
-                    self._table.setRowHidden(r, True)   # start collapsed
-                i += count
-            else:
-                ev = m.events[i]
-                row = self._table.rowCount()
-                self._table.insertRow(row)
-                self._table.setItem(row, 0, QTableWidgetItem(str(i + 1)))
-                self._table.setItem(row, 1, QTableWidgetItem(f"{ev['timestamp']:.3f}"))
-                ti = QTableWidgetItem(ev["event_type"])
-                ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
-                self._table.setItem(row, 2, ti)
-                self._table.setItem(row, 3, QTableWidgetItem(event_summary(ev)))
-                self._table.setItem(row, 4, _guard_item(ev))
-                self._row_event_idx.append(i)
-                i += 1
-
-        self._table.blockSignals(False)
-        self._ev_count.setText(
-            f"{len(m.events)} events" + (f"  ({len(groups)} groups)" if groups else ""))
-        self._apply_event_filter()
-
-    def _toggle_group(self, header_row: int):
-        """Expand / collapse the group whose header is at header_row."""
-        g = self._groups.get(header_row)
-        if not g: return
-        g["collapsed"] = not g["collapsed"]
-        # Update header arrow
-        hdr = self._table.item(header_row, 0)
-        if hdr:
-            hdr.setText(f"{'▶' if g['collapsed'] else '▼'}  ×{g['count']}")
-        # Show / hide the child rows
-        for offset in range(1, g["count"] + 1):
-            r = header_row + offset
-            if r < self._table.rowCount():
-                # Still respect the event-type filter
-                allowed = {et for et, cb in self._ev_filters.items() if cb.isChecked()}
-                visible = (not g["collapsed"]) and (g["et"] in allowed)
-                self._table.setRowHidden(r, not visible)
-
-    def _on_table_cell_clicked(self, row: int, col: int):
-        if row in self._groups:
-            self._toggle_group(row)
-
-    def _on_section_moved(self, logical_idx: int, old_visual: int, new_visual: int):
-        """
-        Translate a header drag (visual reorder) into an actual reorder of
-        the underlying events list, then rebuild the table so display + data
-        stay in sync.  Group-header rows are excluded — only leaf events
-        can be moved.
-        """
-        if not self._current: return
-        # Map visual rows → event indices, ignoring group headers
-        # (visual order after the move)
-        order = []
-        vh = self._table.verticalHeader()
-        for vrow in range(self._table.rowCount()):
-            logical = vh.logicalIndex(vrow)
-            ev_idx = self._row_event_idx[logical] if 0 <= logical < len(self._row_event_idx) else -1
-            if ev_idx >= 0:
-                order.append(ev_idx)
-        if not order: return
-        # Reorder events to match
-        try:
-            new_events = [self._current.events[i] for i in order]
-        except IndexError:
-            return
-        self._current.events = new_events
-        # Reset the visual-section mapping & rebuild from the new event order.
-        vh.blockSignals(True)
-        for i in range(self._table.rowCount()):
-            vh.moveSection(vh.visualIndex(i), i)
-        vh.blockSignals(False)
-        self._fill_table(self._current)
-        self._storage.save_macros(self._macros)
-        self._set_status("Event order saved.", "#a6e3a1")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION: Macro CRUD
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _new_macro(self):
-        m = Macro(name=f"Macro {len(self._macros) + 1}")
-        self._macros.append(m); self._refresh_list()
-        self._macro_list.setCurrentRow(len(self._macros) - 1)
-        self._storage.save_macros(self._macros)
-
-    def _dup_macro(self):
-        if not self._current: return
-        m = self._current.clone(); self._macros.append(m); self._refresh_list()
-        self._macro_list.setCurrentRow(len(self._macros) - 1)
-        self._storage.save_macros(self._macros)
-
-    def _del_macro(self):
-        if not self._current: return
-        if QMessageBox.question(
-            self, "Delete", f"Delete '{self._current.name}'?  (Ctrl+Z to undo)",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes: return
-        mid = self._current.id
-        if mid in self._players: self._players[mid].stop()
-        self._deleted_macro = copy.deepcopy(self._current)   # undo buffer
-        self._macros = [m for m in self._macros if m.id != mid]
-        self._current = None; self._table.setRowCount(0)
-        self._refresh_list(); self._storage.save_macros(self._macros)
-        self._rebuild_hotkeys()
-        self._set_status(f"Deleted '{self._deleted_macro.name}' — press Ctrl+Z to undo", "#fab387")
-
-    def _undo_delete(self):
-        if not self._deleted_macro: return
-        self._macros.append(self._deleted_macro)
-        self._deleted_macro = None
-        self._refresh_list()
-        self._macro_list.setCurrentRow(len(self._macros) - 1)
-        self._storage.save_macros(self._macros)
-        self._rebuild_hotkeys()
-        self._set_status("Delete undone.", "#a6e3a1")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION: Settings Handlers
-    #   Every handler:
-    #     1. Mutates the current macro's state
-    #     2. Persists to disk immediately (no waiting for 30s autosave)
-    #     3. Reapplies any side-effects (hotkeys, button state, list refresh)
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _persist_current(self):
-        """Save macros to disk right now, with a tiny status pulse so the user
-        can see the change took effect."""
-        try:
-            self._storage.save_macros(self._macros)
-        except Exception as e:
-            self._set_status(f"Save failed: {e}", "#f38ba8")
-
-    def _on_name_changed(self, text: str):
-        if not self._current: return
-        self._current.name = text
-        self._refresh_list()
-        self._persist_current()
-
-    def _on_hotkey_changed(self):
-        if not self._current: return
-        self._current.trigger_hotkey = self._hotkey_edit.text().strip()
-        self._rebuild_hotkeys()
-        self._persist_current()
-        self._set_status(
-            f"Trigger hotkey: {self._current.trigger_hotkey or '(none)'}", "#89b4fa")
-
-    def _on_repeat_changed(self, v: int):
-        if not self._current: return
-        self._current.repeat_count = v
-        self._persist_current()
-
-    def _on_speed_changed(self, v: float):
-        if not self._current: return
-        self._current.speed_multiplier = v
-        self._persist_current()
-
-    def _on_move_chk_changed(self, s: int):
-        if not self._current: return
-        self._current.record_mouse_move = bool(s)
-        self._persist_current()
-
-    def _on_use_target_changed(self, s: int):
-        en = bool(s)
-        for btn in (self._capture_btn, self._pick_btn, self._drag_pick_btn1,
-                    self._pick_btn2, self._clear_btn2, self._drag_pick_btn2,
-                    self._pick_btn3, self._clear_btn3, self._drag_pick_btn3):
-            btn.setEnabled(en)
-        if not self._current: return
-        self._current.use_target_window = en
-        self._persist_current()
-
-    def _pick_window(self, slot: int = 1):
-        """
-        Open a dialog listing every visible window with HWND, PID, and title.
-        Selecting one sets it as the macro's target window for the given slot (1/2/3).
-        """
-        if not self._current: return
-        from PyQt6.QtWidgets import QDialog, QListWidget, QDialogButtonBox, QVBoxLayout
-        windows = enumerate_windows()
-        if not windows:
-            QMessageBox.information(self, "Pick Window", "No visible windows found.")
-            return
-        slot_label = {1: "Window 1 (required)", 2: "Window 2 (optional)", 3: "Window 3 (optional)"}
-        dlg = QDialog(self); dlg.setWindowTitle(f"Pick Target — {slot_label.get(slot,'')}")
-        dlg.setMinimumSize(640, 460)
-        v = QVBoxLayout(dlg)
-        lbl = QLabel(
-            f"Select <b>{slot_label.get(slot,'')}</b>.  "
-            "Columns:  HWND  ·  PID  ·  Title")
-        lbl.setStyleSheet("color: #a6adc8;")
-        v.addWidget(lbl)
-        lw = QListWidget()
-        lw.setStyleSheet(
-            "QListWidget { background: #181825; border: 1px solid #313244; "
-            "border-radius: 6px; padding: 4px; font-family: Consolas, monospace; }")
-        cur_title = {1: self._current.target_window_title,
-                     2: getattr(self._current, "target_window_2", ""),
-                     3: getattr(self._current, "target_window_3", "")}.get(slot, "")
-        for hwnd, pid, title in windows:
-            it = QListWidgetItem(f"0x{hwnd:08X}   PID {pid:>6}   {title}")
-            it.setData(Qt.ItemDataRole.UserRole, (hwnd, pid, title))
-            lw.addItem(it)
-            if title == cur_title:
-                lw.setCurrentItem(it)
-        lw.itemDoubleClicked.connect(lambda _i: dlg.accept())
-        v.addWidget(lw, 1)
-        bb = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
-        v.addWidget(bb)
-        if dlg.exec() != QDialog.DialogCode.Accepted: return
-        item = lw.currentItem()
-        if not item: return
-        hwnd, pid, title = item.data(Qt.ItemDataRole.UserRole)
-        self._set_window_slot(slot, title)
-        self._storage.save_macros(self._macros)
-        self._set_status(f"Win{slot}: 0x{hwnd:08X}  PID {pid}  {title}", "#89b4fa")
-
-    def _set_window_slot(self, slot: int, title: str):
-        """Write title into the correct macro field + update the corresponding label."""
-        if not self._current: return
-        if slot == 1:
-            self._current.target_window_title = title
-            self._win_title_lbl.setText(title or "(none)")
-        elif slot == 2:
-            self._current.target_window_2 = title
-            self._win2_title_lbl.setText(title or "(none)")
-        elif slot == 3:
-            self._current.target_window_3 = title
-            self._win3_title_lbl.setText(title or "(none)")
-
-    def _clear_window_slot(self, slot: int):
-        """Clear an optional window slot (2 or 3)."""
-        self._set_window_slot(slot, "")
-        self._storage.save_macros(self._macros)
-        self._set_status(f"Window {slot} cleared.", "#a6adc8")
-
-    def _on_backend_changed(self, idx: int):
-        if not self._current: return
-        name = self._backend_combo.itemData(idx) or "auto"
-        self._current.input_backend = name
-        self._storage.save_macros(self._macros)
-        # Show pretty name in status bar
-        pretty = next((d for n, d, _ in BACKEND_CHOICES if n == name), name)
-        self._set_status(f"Backend: {pretty}", "#89b4fa")
-        # If Detours selected, give the user a heads-up on what's needed
-        if name == "detours" and not (HOOK_DLL_X64.exists() or HOOK_DLL_X86.exists()):
-            self._set_status(
-                f"Backend: Detours — no hook DLL built yet.  Click 'Hook DLL…' for build steps.",
-                "#fab387")
-
-    def _reload_hook(self):
-        """Manual eject + reinject the hook DLL into the current target."""
-        if not self._current or not self._current.use_target_window or \
-           not self._current.target_window_title:
-            self._set_status("Reload Hook: pick a target window first.", "#fab387")
-            return
-        h = find_window_hwnd(self._current.target_window_title)
-        if not h:
-            self._set_status("Reload Hook: target window not found.", "#f38ba8")
-            return
-        pid = get_window_pid(h)
-        self._set_status(f"Reloading hook into PID {pid}…", "#89b4fa")
-        # Run in a thread so the UI doesn't freeze
-        def _worker():
-            ok, msg = _inject_hook(pid, force_reload=True)
-            QTimer.singleShot(0, lambda:
-                self._set_status(("Reload Hook OK: " if ok else "Reload Hook FAILED: ") + msg,
-                                  "#a6e3a1" if ok else "#f38ba8"))
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _open_hook_dir(self):
-        """Show hook-build status (both bitnesses) and open the hooks folder."""
-        x64_dll = HOOK_DLL_X64.exists();  x64_inj = HOOK_INJECTOR_X64.exists()
-        x86_dll = HOOK_DLL_X86.exists();  x86_inj = HOOK_INJECTOR_X86.exists()
-        # Detect target context
-        pid = None
-        if self._current and self._current.use_target_window and self._current.target_window_title:
-            h = find_window_hwnd(self._current.target_window_title)
-            if h: pid = get_window_pid(h)
-        arch_label = "(no target picked)"
-        pipe_ok = False
-        if pid:
-            is64 = _is_process_64bit(pid)
-            arch_label = "x64" if (is64 is None or is64) else "x86"
-            pipe_ok = _pipe_exists(pid)
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("API Hook (Detours) Status")
-        msg.setIcon(QMessageBox.Icon.Information)
-        lines = [
-            f"<b>Hook folder:</b> {HOOK_DIR}",
-            "",
-            "<b>x64 build</b>",
-            f"&nbsp;&nbsp;dinput_hook_x64.dll  : {'✓ found' if x64_dll else '✗ NOT BUILT'}",
-            f"&nbsp;&nbsp;injector_x64.exe     : {'✓ found' if x64_inj else '✗ NOT BUILT'}",
-            "",
-            "<b>x86 build</b>",
-            f"&nbsp;&nbsp;dinput_hook_x86.dll  : {'✓ found' if x86_dll else '✗ NOT BUILT'}",
-            f"&nbsp;&nbsp;injector_x86.exe     : {'✓ found' if x86_inj else '✗ NOT BUILT'}",
-        ]
-        if pid:
-            lines += [
-                "",
-                f"<b>Current target:</b> PID {pid}  (detected {arch_label})",
-                f"&nbsp;&nbsp;Pipe: {'✓ injected — ready' if pipe_ok else '✗ not injected (will auto-inject on Play)'}",
-            ]
-        if not (x64_dll and x64_inj) and not (x86_dll and x86_inj):
-            lines += [
-                "",
-                "<b>To build:</b>",
-                "1. Install Visual Studio Build Tools with 'Desktop C++'.",
-                "2. git clone https://github.com/microsoft/Detours C:\\src\\Detours",
-                "3. From the matching VS prompt, nmake in C:\\src\\Detours.",
-                "4. Compile dinput_hook.cpp + injector.cpp against the matching detours.lib.",
-            ]
-        msg.setText("<br>".join(lines))
-        msg.setStandardButtons(
-            QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Close)
-        msg.button(QMessageBox.StandardButton.Open).setText("Open folder")
-        if msg.exec() == QMessageBox.StandardButton.Open:
-            try:
-                os.startfile(str(HOOK_DIR))
-            except Exception as e:
-                self._set_status(f"Could not open folder: {e}", "#f38ba8")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION: Pixel Guard Handlers
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _on_guard_enabled_changed(self, s: int):
-        if not self._current: return
-        self._current.pixel_guard_enabled = bool(s)
-        self._persist_current()
-
-    def _on_guard_flags_changed(self):
-        if not self._current: return
-        raw = self._guard_flags_edit.text()
-        self._current.pixel_guard_red_flags = [
-            f.strip() for f in raw.split(",") if f.strip()]
-        self._persist_current()
-
-    def _on_guard_key_changed(self):
-        if not self._current: return
-        self._current.pixel_guard_correction_key = self._guard_key_edit.text().strip() or "b"
-        self._persist_current()
-
-    def _on_guard_macro_changed(self, _idx: int):
-        if not self._current: return
-        self._current.pixel_guard_correction_macro = (
-            self._guard_macro_combo.currentData() or "")
-        self._persist_current()
-
-    def _on_guard_cap_changed(self):
-        if not self._current: return
-        self._current.pixel_guard_cap_x_pct = self._guard_cap_x_spin.value()
-        self._current.pixel_guard_cap_y_pct = self._guard_cap_y_spin.value()
-        self._current.pixel_guard_cap_w_pct = self._guard_cap_w_spin.value()
-        self._current.pixel_guard_cap_h_pct = self._guard_cap_h_spin.value()
-        self._persist_current()
-
-    def _test_guard_ocr(self):
-        """Capture the configured region right now and show the OCR result."""
-        if not _PILLOW_OK or not _TESSERACT_OK:
-            if getattr(sys, "_MEIPASS", None):
-                msg = ("OCR libraries failed inside the bundle.\n"
-                       "Rebuild using  build_setup.bat  to re-bundle correctly.")
-            else:
-                msg = ("Pillow / pytesseract not installed.\n\n"
-                       "Run  build_setup.bat  — it installs everything and\n"
-                       "bundles Tesseract into the exe automatically.\n\n"
-                       "Or for dev/script mode:\n"
-                       "  pip install Pillow pytesseract\n"
-                       "  + Tesseract binary: https://github.com/UB-Mannheim/tesseract/wiki")
-            QMessageBox.warning(self, "Pixel Guard — OCR Not Available", msg)
-            return
-        m = self._current
-        hwnd = None
-        if m and m.use_target_window and m.target_window_title:
-            hwnd = find_window_hwnd(m.target_window_title)
-        x_pct = self._guard_cap_x_spin.value()
-        y_pct = self._guard_cap_y_spin.value()
-        w_pct = self._guard_cap_w_spin.value()
-        h_pct = self._guard_cap_h_spin.value()
-        text = _pixel_ocr_region(hwnd, x_pct, y_pct, w_pct, h_pct)
-        flags = getattr(m, "pixel_guard_red_flags", []) if m else []
-        matched = _pixel_flags_match(text, flags)
-        color   = "#f38ba8" if matched else "#a6e3a1"
-        result  = (f"OCR result: '{text or '(empty)'}'\n\n"
-                   + (f"🚩 RED FLAG matched: '{matched}'" if matched
-                      else "✓ No red flags matched."))
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Pixel Guard — OCR Test")
-        msg.setText(f"<span style='color:{color}'>{result}</span>")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.exec()
+    # (old macro list / CRUD replaced by group management above)
 
     def _rebuild_hotkeys(self):
         hmap = {}
-        for m in self._macros:
-            if m.trigger_hotkey.strip():
-                try: hmap[user_hotkey_to_pynput(m.trigger_hotkey.strip())] = m.id
-                except Exception: pass
-        self._hotkeys.update(hmap)
+        for g in self._groups:
+            for lane in g.lanes:
+                if lane.trigger_hotkey.strip():
+                    try:
+                        hmap[user_hotkey_to_pynput(lane.trigger_hotkey.strip())] = (
+                            g.id, lane.id)
+                    except Exception: pass
+        # Store mapping for lookup in _hotkey_fired
+        self._hotkey_map = hmap
+        self._hotkeys.update({k: v for k, v in hmap.items()})
 
     # ══════════════════════════════════════════════════════════════════════════
     # SECTION: Shortcut Editor
@@ -3236,107 +4005,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_sc_hint_updater"):
             self._sc_hint_updater()
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION: Window Capture
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _capture_window(self):
-        if not self._current or self._capture_ctr > 0: return
-        self._capture_ctr = 3
-        self._capture_btn.setEnabled(False)
-        self._tick_capture()
-
-    def _tick_capture(self):
-        n = self._capture_ctr
-        if n > 0:
-            self._capture_btn.setText(f"Capturing in {n}s…")
-            self._capture_ctr -= 1
-            QTimer.singleShot(1000, self._tick_capture)
-        else:
-            title = get_foreground_title()
-            if self._current:
-                self._current.target_window_title = title
-                self._win_title_lbl.setText(title or "(none)")
-                self._storage.save_macros(self._macros)
-            self._capture_btn.setText("Capture (3s)")
-            self._capture_btn.setEnabled(
-                bool(self._current and self._current.use_target_window))
-            self._set_status(f"Win1 set: {title or '(none)'}", "#89b4fa")
-
-    # ── Drag-pick ─────────────────────────────────────────────────────────────
-
-    def _start_drag_pick(self, slot: int):
-        """
-        Minimise, show a hint overlay, capture the next left-click via pynput,
-        resolve the window under the cursor, then restore and set the slot.
-        """
-        if not self._current: return
-        self.showMinimized()
-        from PyQt6.QtWidgets import QDialog, QLabel, QVBoxLayout
-        hint = QDialog(self)
-        hint.setWindowTitle("Drag-Pick Window")
-        hint.setWindowFlags(
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.Tool)
-        hint.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        lbl = QLabel(
-            f"  🎯  Click any window to set it as <b>Window {slot}</b>.\n"
-            "  Press  ESC  to cancel.  ")
-        lbl.setStyleSheet(
-            "background: #313244; color: #cdd6f4; font-size: 14px; padding: 18px; "
-            "border: 2px solid #89b4fa; border-radius: 8px;")
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        QVBoxLayout(hint).addWidget(lbl)
-        hint.adjustSize()
-        hint.move(100, 100)
-        hint.show()
-
-        result: list = [None]
-
-        def _on_click(x, y, button, pressed):
-            if not pressed or button != ms_lib.Button.left: return
-            hwnd = _u32.WindowFromPoint(ctypes.wintypes.POINT(int(x), int(y)))
-            # Walk to root (top-level) window
-            while True:
-                parent = _u32.GetParent(hwnd)
-                if not parent: break
-                hwnd = parent
-            n = _u32.GetWindowTextLengthW(hwnd)
-            if n:
-                buf = ctypes.create_unicode_buffer(n + 1)
-                _u32.GetWindowTextW(hwnd, buf, n + 1)
-                result[0] = buf.value
-            mouse_listener.stop()
-            return False   # suppress the click from reaching the target
-
-        def _on_key(key):
-            if key == Key.esc:
-                mouse_listener.stop()
-            return False
-
-        mouse_listener = ms_lib.Listener(on_click=_on_click)
-        kb_listener    = kb_lib.Listener(on_press=_on_key)
-
-        def _wait():
-            mouse_listener.join()
-            kb_listener.stop()
-            QTimer.singleShot(0, _done)
-
-        def _done():
-            hint.close()
-            self.showNormal(); self.raise_(); self.activateWindow()
-            if result[0]:
-                self._set_window_slot(slot, result[0])
-                self._storage.save_macros(self._macros)
-                self._set_status(f"Win{slot} set via drag-pick: {result[0]}", "#89b4fa")
-            else:
-                self._set_status("Drag-pick cancelled.", "#a6adc8")
-
-        mouse_listener.start()
-        kb_listener.start()
-        threading.Thread(target=_wait, daemon=True).start()
-
     # ── Log copy helpers ──────────────────────────────────────────────────────
 
     def _copy_log_file(self, path: Path, label: str):
@@ -3363,220 +4031,213 @@ class MainWindow(QMainWindow):
         self._copy_log_file(_CRASH_LOG_PATH, "Crash log")
 
     # ══════════════════════════════════════════════════════════════════════════
-    # SECTION: Recording
+    # SECTION: Per-lane Recording
     # ══════════════════════════════════════════════════════════════════════════
 
     def _toggle_record(self):
-        if self._recording: self._stop_recording()
-        else:               self._start_recording()
+        """Global shortcut: toggle recording on the currently visible lane tab."""
+        if not self._lane_widgets: return
+        tab = self._lane_tabs.currentIndex()
+        if 0 <= tab < len(self._lane_widgets):
+            lw = self._lane_widgets[tab]
+            mid = lw.macro.id
+            if mid in self._recorders:
+                self._stop_recording(mid)
+            else:
+                self._on_record_req(mid)
+
+    def _on_record_req(self, macro_id: str):
+        """LaneWidget record button clicked."""
+        # Stop if already recording this lane
+        if macro_id in self._recorders:
+            self._stop_recording(macro_id); return
+        # Stop any other active recording first
+        for mid in list(self._recorders.keys()):
+            self._stop_recording(mid)
+        # Find the lane widget
+        lw = self._find_lane_widget(macro_id)
+        if not lw: return
+        m = lw.macro
+        m.events = []; lw._fill_table()
+        target_hwnd = None
+        if m.use_target_window and m.target_window_title:
+            target_hwnd = find_window_hwnd(m.target_window_title)
+        rec = RecorderThread(
+            record_mouse_move=m.record_mouse_move,
+            filter_keys=self._build_shortcut_filter(),
+            target_hwnd=target_hwnd)
+        rec.captured.connect(lambda ev, lw_=lw: lw_.add_event(ev))
+        rec.done.connect(lambda mid=macro_id: self._on_rec_done(mid))
+        self._recorders[macro_id] = rec
+        lw.set_recording(True)
+        self._recording_lane = macro_id
+        self._flash_timer.start(600)
+        sound_record_start()
+        self._set_status(f"● REC lane '{m.name}'", "#f38ba8")
+        rec.begin()
+
+    def _stop_recording(self, macro_id: str):
+        rec = self._recorders.get(macro_id)
+        if rec: rec.end()
+
+    def _on_rec_done(self, macro_id: str):
+        self._recorders.pop(macro_id, None)
+        self._flash_timer.stop()
+        lw = self._find_lane_widget(macro_id)
+        if lw:
+            lw.set_recording(False)
+            lw._fill_table()
+            n = len(lw.macro.events)
+            self._set_status(f"Rec done — {n} events in '{lw.macro.name}'", "#a6adc8")
+        self._recording_lane = None
+        sound_record_stop()
+        self._storage.save_groups(self._groups)
 
     def _build_shortcut_filter(self) -> set:
-        """
-        Build the set of pynput-style key strings the recorder must NOT capture.
-        Includes the FINAL key of every currently bound app shortcut, so that
-        pressing the record / play / stop hotkey never adds itself to the macro.
-        Modifier keys (Ctrl/Alt/Shift/Meta) are intentionally NOT filtered.
-        """
         skip = set()
         alias = {"del":"delete","return":"enter","esc":"escape",
                  "ins":"insert","pgup":"page_up","pgdn":"page_down"}
-        for action, binding in self._sc_config.items():
+        for binding in self._sc_config.values():
             if not binding: continue
             final = binding.split("+")[-1].strip().lower()
             if not final or final in ("ctrl","control","alt","shift","meta","cmd","win"):
                 continue
             final = alias.get(final, final)
-            if len(final) == 1:
-                skip.add(final)
-            else:
-                skip.add(f"Key.{final}")
+            skip.add(final if len(final) == 1 else f"Key.{final}")
         return skip
-
-    def _start_recording(self):
-        if not self._current: self._new_macro()
-        self._recording = True
-        self._current.events = []; self._fill_table(self._current)
-        self._btn_record.setText("⏹  Stop Rec")
-        self._set_status("● RECORDING — press the Record shortcut again to stop", "#f38ba8")
-        self._flash_timer.start(600)
-        sound_record_start()
-        # Resolve target window for client-coord recording (portable macros)
-        target_hwnd = None
-        if self._current.use_target_window and self._current.target_window_title:
-            target_hwnd = find_window_hwnd(self._current.target_window_title)
-            if target_hwnd:
-                self._set_status(
-                    f"● RECORDING into window 0x{target_hwnd:08X} — "
-                    "mouse coords are CLIENT-relative.  Press the Record shortcut to stop.",
-                    "#f38ba8")
-        self._recorder = RecorderThread(
-            record_mouse_move=self._current.record_mouse_move,
-            filter_keys=self._build_shortcut_filter(),
-            target_hwnd=target_hwnd)
-        self._recorder.captured.connect(self._on_captured)
-        self._recorder.done.connect(self._on_rec_done)
-        self._recorder.begin()
-
-    def _stop_recording(self):
-        if self._recorder: self._recorder.end()
-
-    def _on_captured(self, ev: dict):
-        if not self._current: return
-        self._current.events.append(ev)
-        # Append a normal row (without group computation during live capture —
-        # grouping happens on next _fill_table, which runs after recording ends)
-        row = self._table.rowCount()
-        self._table.insertRow(row)
-        n = len(self._current.events)
-        self._table.setItem(row, 0, QTableWidgetItem(str(n)))
-        self._table.setItem(row, 1, QTableWidgetItem(f"{ev['timestamp']:.3f}"))
-        ti = QTableWidgetItem(ev["event_type"])
-        ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
-        self._table.setItem(row, 2, ti)
-        self._table.setItem(row, 3, QTableWidgetItem(event_summary(ev)))
-        guard_it = QTableWidgetItem()
-        guard_it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable |
-                          Qt.ItemFlag.ItemIsUserCheckable)
-        guard_it.setCheckState(Qt.CheckState.Unchecked)
-        guard_it.setToolTip("Check to run Pixel Bot OCR guard before this event")
-        self._table.setItem(row, 4, guard_it)
-        self._row_event_idx.append(n - 1)
-        if ev["event_type"] not in {et for et, cb in self._ev_filters.items() if cb.isChecked()}:
-            self._table.setRowHidden(row, True)
-        self._table.scrollToBottom()
-        self._ev_count.setText(f"{n} events")
-
-    def _on_rec_done(self):
-        self._recording = False; self._flash_timer.stop()
-        self._btn_record.setText("⏺  Record")
-        n = len(self._current.events) if self._current else 0
-        self._set_status(f"Recording stopped — {n} events captured.", "#a6adc8")
-        sound_record_stop()
-        self._storage.save_macros(self._macros)
 
     def _flash_record_btn(self):
         self._flash_state = not self._flash_state
-        self._btn_record.setText("⏹  Stop Rec ●" if self._flash_state else "⏹  Stop Rec  ")
+        lw = self._find_lane_widget(self._recording_lane) if self._recording_lane else None
+        if lw:
+            lw._btn_record.setText(
+                "⏹ Stop Rec ●" if self._flash_state else "⏹ Stop Rec  ")
 
     # ══════════════════════════════════════════════════════════════════════════
-    # SECTION: Playback
+    # SECTION: Playback — Chain + single-lane
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _play_current(self):
-        if self._recording: return
-        if self._current:   self._play_macro(self._current)
-
-    def _play_macro(self, m: Macro):
-        if not m.events:
-            self._set_status("No events to play.", "#fab387"); return
-        if m.id in self._players: return
-        p = PlayerThread(m, all_macros=self._macros)
-        p.guard_sig.connect(self._on_guard_triggered)
-        p.started_sig.connect(self._on_play_started)
-        p.stopped_sig.connect(self._on_play_stopped)
-        p.progress_sig.connect(self._on_play_progress)
-        p.mode_sig.connect(self._on_play_mode)
-        self._players[m.id] = p; p.start()
-
-    def _stop_current(self):
-        if not self._current: return
-        p = self._players.get(self._current.id)
-        if p is None: return
-        try:
-            p.stop()
-            self._set_status(f"Stopping '{self._current.name}'…", "#fab387")
-        except Exception as e:
-            _log_crash(f"_stop_current: {e}")
-
-    def _stop_all(self):
-        for p in list(self._players.values()): p.stop()
-
-    def _on_play_started(self, mid: str):
-        self._refresh_list(); self._update_play_btns()
-        m = self._find(mid)
-        if m:
-            m.run_count += 1
-            self._storage.save_macros(self._macros)
-        self._set_status(f"▶ Playing: {m.name if m else mid}", "#a6e3a1")
-        self._update_active_label()
-        sound_play_start(); speak(m.name if m else mid)
-        # Start the runtime timer
-        self._play_start_times[mid] = time.perf_counter()
+    def _play_chain(self):
+        """Play button: run entire chain for the current group."""
+        if not self._cur_group or self._recorders: return
+        gid = self._cur_group.id
+        if gid in self._chain_players: return
+        if not self._cur_group.lanes[0].events:
+            self._set_status("Primary lane has no events.", "#fab387"); return
+        cp = ChainPlayerThread(self._cur_group, self._groups)
+        cp.lane_started.connect(self._on_lane_started)
+        cp.lane_stopped.connect(self._on_lane_stopped_sig)
+        cp.chain_stopped.connect(self._on_chain_stopped)
+        cp.progress_sig.connect(self._on_chain_progress)
+        cp.mode_sig.connect(self._on_chain_mode)
+        cp.guard_sig.connect(self._on_chain_guard)
+        cp.log_sig.connect(self._append_log)
+        self._chain_players[gid] = cp
+        self._play_start_times[gid] = time.perf_counter()
         if not self._runtime_timer.isActive():
             self._runtime_timer.start(200)
+        cp.start()
+        self._update_play_btns()
+        self._refresh_group_list()
+        self._set_status(f"▶▶ Chain '{self._cur_group.name}' started", "#a6e3a1")
+        sound_play_start()
+        speak(self._cur_group.name)
 
-    def _on_play_mode(self, mid: str, backend_name: str):
-        m = self._find(mid)
-        label = m.name if m else mid
-        # New: error reason packed as "error:<text>"
-        if backend_name.startswith("error:"):
-            reason = backend_name[6:] or "no reason given"
-            # Remember so _on_play_stopped doesn't overwrite with "Playback complete"
-            self._play_failure_msg[mid] = f"⚠ '{label}' — backend failed: {reason}"
-            self._set_status(self._play_failure_msg[mid], "#f38ba8")
-            return
-        if backend_name == "none":
-            self._set_status(f"⚠  '{label}' — no usable backend.", "#f38ba8")
-        elif backend_name == "winmsg":
-            self._set_status(f"▶ '{label}' — silent background injection (winmsg).", "#a6e3a1")
-        elif backend_name == "postmsg":
-            self._set_status(f"▶ '{label}' — PostMessage async injection.", "#a6e3a1")
-        elif backend_name == "detours":
-            self._set_status(
-                f"▶ Playing '{label}' via API Hook (Detours).  Hook DLL log: "
-                f"~/.macro_recorder/dll_hook.log",
-                "#a6e3a1")
-        elif backend_name == "pynput":
-            self._set_status(
-                f"⚠  '{label}' — pynput backend: your real mouse & keyboard WILL be used.",
-                "#fab387")
-        elif backend_name == "interception":
-            self._set_status(f"▶ '{label}' — Interception driver (kernel input).", "#89b4fa")
-        elif backend_name == "serial_hid":
-            self._set_status(f"▶ '{label}' — Serial HID (real USB device).", "#cba6f7")
+    def _on_lane_play_req(self, macro_id: str):
+        """Single-lane play from LaneWidget button (plays just that lane once)."""
+        if self._recorders: return
+        lane = self._find_lane(macro_id)
+        if not lane or not lane.events:
+            self._set_status("No events in lane.", "#fab387"); return
+        # Build a 1-lane temp group
+        tmp = MacroGroup(name=f"[{lane.name}]")
+        tmp.lanes = [lane]
+        if macro_id in self._chain_players: return
+        cp = ChainPlayerThread(tmp, self._groups)
+        cp.lane_started.connect(self._on_lane_started)
+        cp.lane_stopped.connect(self._on_lane_stopped_sig)
+        cp.chain_stopped.connect(self._on_chain_stopped)
+        cp.progress_sig.connect(self._on_chain_progress)
+        cp.mode_sig.connect(self._on_chain_mode)
+        cp.guard_sig.connect(self._on_chain_guard)
+        cp.log_sig.connect(self._append_log)
+        self._chain_players[macro_id] = cp   # key = macro_id for single-lane
+        self._play_start_times[macro_id] = time.perf_counter()
+        if not self._runtime_timer.isActive():
+            self._runtime_timer.start(200)
+        cp.start()
+        lw = self._find_lane_widget(macro_id)
+        if lw: lw.set_playing(True)
+        self._update_play_btns()
+        self._set_status(f"▶ Lane '{lane.name}' playing", "#a6e3a1")
+        sound_play_start()
 
-    def _on_guard_triggered(self, mid: str, flag: str):
-        m = self._find(mid)
-        label = m.name if m else mid
-        self._set_status(
-            f"🛡 Guard triggered in '{label}' — red flag: '{flag}'.  Correction running, restarting…",
-            "#f9e2af")
+    def _on_lane_stop_req(self, macro_id: str):
+        cp = self._chain_players.get(macro_id)
+        if cp: cp.stop()
+        # Also stop the group chain if the macro is part of active group
+        if self._cur_group:
+            cp2 = self._chain_players.get(self._cur_group.id)
+            if cp2: cp2.stop()
 
-    def _on_play_stopped(self, mid: str):
-        self._players.pop(mid, None); self._refresh_list(); self._update_play_btns()
-        self._play_start_times.pop(mid, None)
-        if not self._players and self._runtime_timer.isActive():
+    def _stop_all(self):
+        for cp in list(self._chain_players.values()): cp.stop()
+        for rec in list(self._recorders.values()): rec.end()
+
+    # ── Chain signals ─────────────────────────────────────────────────────────
+
+    def _on_lane_started(self, gid: str, lane_idx: int, mid: str):
+        lw = self._find_lane_widget(mid)
+        if lw: lw.set_playing(True)
+        self._update_active_label()
+
+    def _on_lane_stopped_sig(self, gid: str, lane_idx: int, mid: str):
+        lw = self._find_lane_widget(mid)
+        if lw: lw.set_playing(False)
+
+    def _on_chain_stopped(self, gid: str):
+        self._chain_players.pop(gid, None)
+        self._play_start_times.pop(gid, None)
+        if not self._chain_players:
             self._runtime_timer.stop()
             self._runtime_lbl.setText("")
-        # If the player aborted due to a backend failure, keep that warning
-        # visible instead of overwriting with the cheerful "Playback complete".
-        failed = self._play_failure_msg.pop(mid, None)
-        if failed:
-            self._set_status(failed, "#f38ba8")
-        elif not self._players:
-            self._set_status("Playback complete.", "#a6adc8")
+        self._update_play_btns()
+        self._refresh_group_list()
+        for lw in self._lane_widgets:
+            lw.set_playing(False)
         self._update_active_label()
-        sound_play_stop()
-        # Don't speak "MACRO stopped" for a failure — it's misleading
-        if not failed: speak("MACRO stopped")
+        self._set_status("Chain complete.", "#a6adc8")
+        sound_play_stop(); speak("done")
+        self._storage.save_groups(self._groups)
 
-    def _on_play_progress(self, mid: str, idx: int, total: int):
-        if self._current and self._current.id == mid:
-            if idx < self._table.rowCount():
-                self._table.selectRow(idx)
-                self._table.scrollTo(self._table.model().index(idx, 0))
+    def _on_chain_progress(self, gid: str, lane_idx: int, idx: int, total: int):
+        if self._cur_group and self._cur_group.id == gid:
+            if 0 <= lane_idx < len(self._lane_widgets):
+                self._lane_widgets[lane_idx].highlight_event(idx)
+
+    def _on_chain_mode(self, gid: str, lane_idx: int, backend_name: str):
+        if backend_name.startswith("error:"):
+            reason = backend_name[6:]
+            self._append_log(f"  ⚠ Lane {lane_idx} backend error: {reason}")
+            self._set_status(f"Lane {lane_idx} backend failed: {reason}", "#f38ba8")
+        else:
+            self._append_log(f"  Backend: {backend_name}")
+
+    def _on_chain_guard(self, gid: str, lane_idx: int, flag: str):
+        self._set_status(f"🛡 Guard lane {lane_idx} — '{flag}' — correcting…", "#f9e2af")
 
     def _update_play_btns(self):
-        any_p = bool(self._players)
-        cur_p = bool(self._current and self._current.id in self._players)
-        self._btn_stop.setEnabled(cur_p)
+        any_p = bool(self._chain_players)
         self._btn_stop_all.setEnabled(any_p)
+        self._btn_play_chain.setEnabled(
+            not any_p and bool(self._cur_group))
 
     def _update_active_label(self):
-        n = len(self._players)
-        total = sum(m.run_count for m in self._macros)
-        self._active_lbl.setText(f"  ▶ {total} execution{'s' if total != 1 else ''}" if total else "")
-        self._active_lbl.setToolTip(f"{n} macro(s) running" if n else "No macros running")
+        n = len(self._chain_players)
+        total = sum(lane.run_count for g in self._groups for lane in g.lanes)
+        self._active_lbl.setText(
+            f"  ▶ {total} execution{'s' if total != 1 else ''}" if total else "")
+        self._active_lbl.setToolTip(f"{n} chain(s) running" if n else "No chains running")
 
     def _tick_runtime(self):
         """Refresh the runtime label while any macro is playing."""
@@ -3594,74 +4255,61 @@ class MainWindow(QMainWindow):
             self._runtime_lbl.setText(f"⏱ {m:d}:{s:02d}")
 
     # ══════════════════════════════════════════════════════════════════════════
-    # SECTION: Event Editor
+    # SECTION: Hotkey Callbacks + Utilities
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _clear_events(self):
-        if not self._current: return
-        if QMessageBox.question(
-            self, "Clear", "Clear all recorded events?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) == QMessageBox.StandardButton.Yes:
-            self._current.events = []; self._table.setRowCount(0)
-            self._ev_count.setText("0 events")
-            self._storage.save_macros(self._macros)
+    def _hotkey_fired(self, payload):
+        """payload is (group_id, macro_id) tuple from _hotkey_map."""
+        if self._recorders: return
+        if not isinstance(payload, tuple): return
+        gid, mid = payload
+        g = next((x for x in self._groups if x.id == gid), None)
+        if not g: return
+        if gid in self._chain_players:
+            self._chain_players[gid].stop()
+        else:
+            if self._cur_group and self._cur_group.id == gid:
+                self._play_chain()
 
-    def _del_selected_events(self):
-        if not self._current: return
-        # Translate selected table rows → event indices (skip group headers)
-        ev_indices = set()
-        for idx in self._table.selectedIndexes():
-            r = idx.row()
-            if 0 <= r < len(self._row_event_idx):
-                e = self._row_event_idx[r]
-                if e >= 0: ev_indices.add(e)
-        for e in sorted(ev_indices, reverse=True):
-            if e < len(self._current.events):
-                self._current.events.pop(e)
-        self._fill_table(self._current)
-        self._storage.save_macros(self._macros)
+    def _find_lane(self, macro_id: str) -> Optional[Macro]:
+        for g in self._groups:
+            for lane in g.lanes:
+                if lane.id == macro_id: return lane
+        return None
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION: Hotkey Callbacks  (called from pynput thread)
-    # ══════════════════════════════════════════════════════════════════════════
+    def _find_lane_widget(self, macro_id: str) -> Optional[LaneWidget]:
+        for lw in self._lane_widgets:
+            if lw.macro.id == macro_id: return lw
+        return None
 
-    def _hotkey_fired(self, macro_id: str):
-        if self._recording: return
-        m = self._find(macro_id)
-        if not m: return
-        if macro_id in self._players: self._players[macro_id].stop()
-        else: self._play_macro(m)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SECTION: Utilities
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _find(self, macro_id: str) -> Optional[Macro]:
-        return next((m for m in self._macros if m.id == macro_id), None)
+    def _append_log(self, msg: str):
+        ts = time.strftime("%H:%M:%S")
+        self._log.append(f"[{ts}] {msg}")
 
     def _set_status(self, msg: str, color: str = "#a6adc8"):
         self._status.setText(msg)
         self._status.setStyleSheet(f"color: {color};")
 
+    def _del_events_if_focused(self):
+        # Delegate to active lane widget
+        for lw in self._lane_widgets:
+            if lw._table.hasFocus():
+                lw._del_selected_events(); return
+
     def _quit_app(self):
-        """Fully clean up then exit — avoids PyInstaller temp-dir removal error."""
         self._stop_all()
-        # Give player threads up to 1 s to shut down cleanly
-        deadline = time.perf_counter() + 1.0
-        while self._players and time.perf_counter() < deadline:
+        deadline = time.perf_counter() + 1.5
+        while self._chain_players and time.perf_counter() < deadline:
             time.sleep(0.05)
         self._hotkeys.stop(); self._app_hotkeys.stop()
-        self._storage.save_macros(self._macros)
-        # Close the faulthandler file so PyInstaller can clean _MEI* on exit
+        self._storage.save_groups(self._groups)
         try:
-            faulthandler.disable()
-            _crash_fp.close()
+            faulthandler.disable(); _crash_fp.close()
         except Exception: pass
         QApplication.quit()
 
     def closeEvent(self, event):
-        self._storage.save_macros(self._macros)
+        self._storage.save_groups(self._groups)
         event.ignore(); self.hide()
         self._tray.showMessage("QytCroRec",
             "Running in system tray. Double-click to restore.",
