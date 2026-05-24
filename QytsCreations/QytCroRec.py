@@ -351,6 +351,29 @@ class Storage:
         except Exception:
             return dict(DEFAULT_SHORTCUTS)
 
+    # ── Generic prefs (key/value) ──────────────────────────────────────────────
+
+    @property
+    def _prefs_path(self) -> Path:
+        return self.dir / "prefs.json"
+
+    def save_pref(self, key: str, value):
+        try:
+            prefs = {}
+            if self._prefs_path.exists():
+                prefs = json.loads(self._prefs_path.read_text(encoding="utf-8"))
+            prefs[key] = value
+            self._prefs_path.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+        except Exception: pass
+
+    def load_pref(self, key: str, default=None):
+        try:
+            if self._prefs_path.exists():
+                prefs = json.loads(self._prefs_path.read_text(encoding="utf-8"))
+                return prefs.get(key, default)
+        except Exception: pass
+        return default
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # KEY / BUTTON HELPERS
@@ -2097,6 +2120,8 @@ STYLE = """
 QMainWindow { background: transparent; }
 QWidget     { background: transparent; color: #e8eaf6;
               font-family: 'Segoe UI', sans-serif; font-size: 13px; }
+QLabel      { color: #e8eaf6; background: transparent; }
+QCheckBox   { color: #e8eaf6; background: transparent; }
 
 /* ── Opaque panels ───────────────────────────────────────────────────────── */
 QListWidget {
@@ -2762,7 +2787,7 @@ class LaneWidget(QWidget):
         r1.addWidget(QLabel("Name:"))
         self._name_edit = QLineEdit(placeholderText="Lane name…")
         self._name_edit.setText(self._macro.name)
-        self._name_edit.textChanged.connect(self._on_name_changed)
+        self._name_edit.editingFinished.connect(self._on_name_changed)
         r1.addWidget(self._name_edit)
         r1.addSpacing(12)
         r1.addWidget(QLabel("Hotkey:"))
@@ -2796,26 +2821,34 @@ class LaneWidget(QWidget):
 
         # Target window
         win_lbl_style = (
-            "color: #585b70; font-size: 12px; background: #181825;"
-            "border: 1px solid #313244; border-radius: 4px; padding: 3px 10px;")
+            "color: #a6adc8; font-size: 12px;"
+            "background: rgba(12,12,24,0.80);"
+            "border: 1px solid rgba(139,180,248,0.25);"
+            "border-radius: 4px; padding: 3px 10px;")
 
         self._use_target_chk = QCheckBox("Force Target Window")
         self._use_target_chk.setChecked(self._macro.use_target_window)
         self._use_target_chk.stateChanged.connect(self._on_use_target_changed)
         lay.addWidget(self._use_target_chk)
 
-        rw = QHBoxLayout(); rw.setContentsMargins(20, 0, 0, 0)
+        rw = QHBoxLayout(); rw.setContentsMargins(20, 0, 0, 0); rw.setSpacing(6)
         self._win_lbl = QLabel(self._macro.target_window_title or "(none)")
-        self._win_lbl.setStyleSheet(win_lbl_style); self._win_lbl.setMinimumWidth(200)
+        self._win_lbl.setStyleSheet(win_lbl_style); self._win_lbl.setMinimumWidth(180)
+        self._win_lbl.setWordWrap(False)
         rw.addWidget(self._win_lbl, 1)
-        self._pick_btn = QPushButton("Pick…"); self._pick_btn.setMaximumWidth(60)
+        self._pick_btn = QPushButton("Pick…")
+        self._pick_btn.setMinimumWidth(72); self._pick_btn.setMaximumWidth(90)
+        self._pick_btn.setToolTip("Open window picker list")
         self._pick_btn.clicked.connect(lambda: self._pick_window(1))
         rw.addWidget(self._pick_btn)
-        self._capture_btn = QPushButton("Capture 3s"); self._capture_btn.setMaximumWidth(90)
+        self._capture_btn = QPushButton("Capture 3s")
+        self._capture_btn.setMinimumWidth(100); self._capture_btn.setMaximumWidth(120)
+        self._capture_btn.setToolTip("Focus target window in 3 seconds then auto-capture")
         self._capture_btn.clicked.connect(self._capture_window)
         rw.addWidget(self._capture_btn)
-        self._drag_btn = QPushButton("🎯"); self._drag_btn.setMaximumWidth(36)
-        self._drag_btn.setToolTip("Drag-pick: click any window to select it")
+        self._drag_btn = QPushButton("🎯 Drag")
+        self._drag_btn.setMinimumWidth(72); self._drag_btn.setMaximumWidth(90)
+        self._drag_btn.setToolTip("Drag-pick: click any window to select it as target")
         self._drag_btn.clicked.connect(lambda: self._start_drag_pick(1))
         rw.addWidget(self._drag_btn)
         lay.addLayout(rw)
@@ -3529,8 +3562,8 @@ class LaneWidget(QWidget):
         self._macro.lane_enabled = bool(s)
         self.changed.emit(self._macro.id)
 
-    def _on_name_changed(self, text):
-        self._macro.name = text
+    def _on_name_changed(self):
+        self._macro.name = self._name_edit.text()
         self.changed.emit(self._macro.id)
 
     def _on_hotkey_changed(self):
@@ -3803,8 +3836,8 @@ class MainWindow(QMainWindow):
         self._rebuild_hotkeys()
         self._update_active_label()
 
-        if AUTO_UPDATE_ENABLED:
-            threading.Thread(target=self._check_for_updates, daemon=True).start()
+        # Always start the update thread — the thread checks the pref internally
+        threading.Thread(target=self._check_for_updates, daemon=True).start()
 
     def _autosave_fn(self):
         self._storage.save_groups(self._groups)
@@ -3900,13 +3933,33 @@ class MainWindow(QMainWindow):
 
     # ── Auto-update ───────────────────────────────────────────────────────────
 
+    def _on_autoupdate_toggled(self, checked: bool):
+        self._storage.save_pref("auto_update", checked)
+        if not checked:
+            QMessageBox.information(
+                self, "Auto-Update Disabled",
+                "Auto-update is now OFF.\n\n"
+                "Latest releases will NOT be downloaded automatically.\n"
+                "Only uncheck this if you are satisfied with the current version\n"
+                "or prefer to update manually from GitHub Releases.")
+
     def _check_for_updates(self):
+        # Re-read pref from disk (checkbox may not be built yet on first call)
+        if not self._storage.load_pref("auto_update", True):
+            return
         upd = AutoUpdater(__version__, UPDATE_VERSION_URL, UPDATE_SCRIPT_URL,
                           exe_url=UPDATE_EXE_URL)
         info = upd.check()
         if not info: return
-        # Marshal the prompt to the GUI thread
-        QTimer.singleShot(0, lambda: self._prompt_update(upd, info))
+        # Marshal the prompt to the GUI thread via a signal-safe mechanism
+        self._pending_update = (upd, info)
+        QTimer.singleShot(500, self._show_pending_update)
+
+    def _show_pending_update(self):
+        if not hasattr(self, "_pending_update"): return
+        upd, info = self._pending_update
+        del self._pending_update
+        self._prompt_update(upd, info)
 
     def _prompt_update(self, upd: "AutoUpdater", info: dict):
         msg = QMessageBox(self)
@@ -4015,6 +4068,22 @@ class MainWindow(QMainWindow):
         self._register_btn("dup_macro", btn_dup, "Duplicate group")
         self._register_btn("del_macro", btn_del, "Delete group")
         for b in (btn_new, btn_dup, btn_del): row.addWidget(b)
+
+        # Auto-update checkbox
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet("color: rgba(139,180,248,0.20);"); sep.setFixedWidth(10)
+        row.addWidget(sep)
+        self._autoupdate_chk = QCheckBox("🔄 Auto-Update")
+        self._autoupdate_chk.setToolTip(
+            "Automatically check for updates on startup.\n"
+            "When enabled, you will be prompted to update when a new version is available.")
+        self._autoupdate_chk.setStyleSheet(
+            "QCheckBox { color: #a6adc8; font-size: 12px; spacing: 4px; }"
+            "QCheckBox:hover { color: #cdd6f4; }")
+        self._autoupdate_chk.setChecked(self._storage.load_pref("auto_update", True))
+        self._autoupdate_chk.toggled.connect(self._on_autoupdate_toggled)
+        row.addWidget(self._autoupdate_chk)
+
         row.addStretch()
         btn_diag = QPushButton("📋 Diag Log")
         btn_diag.setStyleSheet(
@@ -4053,6 +4122,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(hdr)
         self._group_list = QListWidget()
         self._group_list.currentRowChanged.connect(self._on_group_row_changed)
+        self._group_list.itemDoubleClicked.connect(self._rename_group_item)
+        self._group_list.itemChanged.connect(self._on_group_item_renamed)
         lay.addWidget(self._group_list)
         return w
 
@@ -4687,13 +4758,35 @@ class MainWindow(QMainWindow):
         self._group_list.clear(); restore = 0
         for i, g in enumerate(self._groups):
             playing = g.id in self._chain_players
-            item = QListWidgetItem(f"{'▶ ' if playing else '   '}{g.name}")
+            item = QListWidgetItem(g.name)
             item.setData(Qt.ItemDataRole.UserRole, g.id)
-            if playing: item.setForeground(QColor("#a6e3a1"))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            if playing:
+                item.setForeground(QColor("#a6e3a1"))
+                item.setIcon(QIcon())  # could set play icon
             self._group_list.addItem(item)
             if g.id == cur_id: restore = i
         self._group_list.blockSignals(False)
         if self._groups: self._group_list.setCurrentRow(restore)
+
+    def _rename_group_item(self, item: QListWidgetItem):
+        """Start inline rename on double-click."""
+        self._group_list.editItem(item)
+
+    def _on_group_item_renamed(self, item: QListWidgetItem):
+        """Persist the new name after inline edit completes."""
+        gid = item.data(Qt.ItemDataRole.UserRole)
+        new_name = item.text().strip()
+        if not new_name: new_name = "Group"
+        g = next((g for g in self._groups if g.id == gid), None)
+        if g and g.name != new_name:
+            g.name = new_name
+            # Keep lane tab title in sync if this is the current group
+            self._storage.save_groups(self._groups)
+        # Restore clean text (strip stray whitespace)
+        self._group_list.blockSignals(True)
+        item.setText(new_name)
+        self._group_list.blockSignals(False)
 
     def _on_group_row_changed(self, row: int):
         if 0 <= row < len(self._groups):
