@@ -1,4 +1,4 @@
 {
-  "version": "1.20",
-  "notes": "v1.20: bundle hook DLLs and injector exes into distributed .exe so Detours backend works out-of-the-box."
+  "version": "1.21",
+  "notes": "v1.21: fix PyInstaller temp-dir cleanup error on stop/quit; 3-window simultaneous targeting with drag-pick cursor selector; diagnostic + crash log copy buttons in topbar; crash log always flushed before copy."
 }

@@ -18,12 +18,12 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.18"
+__version__ = "1.21"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
-UPDATE_VERSION_URL = "https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/version.json"
-UPDATE_SCRIPT_URL  = "https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/macro_recorder.py"
+UPDATE_VERSION_URL = "https://raw.githubusercontent.com/265ada/QytsCreations/main/QytsCreations/version.json"
+UPDATE_SCRIPT_URL  = "https://raw.githubusercontent.com/265ada/QytsCreations/main/QytsCreations/QytCroRec.py"
 AUTO_UPDATE_ENABLED = True   # set False to disable startup check
 
 import sys, json, time, uuid, copy, threading, os, urllib.request, urllib.error
@@ -121,9 +121,12 @@ class Macro:
     speed_multiplier:    float = 1.0
     record_mouse_move:   bool  = True
     target_window_title: str   = ""
+    target_window_2:     str   = ""
+    target_window_3:     str   = ""
     use_target_window:   bool  = False
     input_backend:       str   = "auto"    # "auto" | "winmsg" | "pynput" | "interception" | "serial_hid"
     created_at:          float = field(default_factory=time.time)
+    run_count:           int   = 0
 
     def clone(self) -> "Macro":
         m = copy.deepcopy(self)
@@ -1052,6 +1055,50 @@ class DetoursBackend(InputBackend):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MULTI-WINDOW BACKEND — fans out identical events to 2 or 3 target windows
+# simultaneously.  Each sub-backend is a regular InputBackend; errors in one
+# window do not stop delivery to the others.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class MultiWindowBackend(InputBackend):
+    """Dispatches every event to a list of concrete backends in order."""
+    name = "multi"
+
+    def __init__(self, backends: list):
+        self._backends = [b for b in backends if b is not None]
+
+    def key_down(self, key_str):
+        for b in self._backends:
+            try: b.key_down(key_str)
+            except Exception: pass
+
+    def key_up(self, key_str):
+        for b in self._backends:
+            try: b.key_up(key_str)
+            except Exception: pass
+
+    def mouse_move(self, sx, sy):
+        for b in self._backends:
+            try: b.mouse_move(sx, sy)
+            except Exception: pass
+
+    def mouse_button(self, sx, sy, button_str, pressed):
+        for b in self._backends:
+            try: b.mouse_button(sx, sy, button_str, pressed)
+            except Exception: pass
+
+    def mouse_scroll(self, sx, sy, dx, dy):
+        for b in self._backends:
+            try: b.mouse_scroll(sx, sy, dx, dy)
+            except Exception: pass
+
+    def close(self):
+        for b in self._backends:
+            try: b.close()
+            except Exception: pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # BACKEND FACTORY — resolves the backend selected on a macro
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1131,6 +1178,19 @@ def create_backend(macro: "Macro") -> Optional[InputBackend]:
             b = builders[choice]()
             if b is None:
                 _LAST_BACKEND_ERROR = f"Backend '{choice}' is not available on this machine."
+                return None
+            # If extra target windows are configured, wrap in MultiWindowBackend
+            extra_titles = [t for t in (getattr(macro, "target_window_2", ""),
+                                        getattr(macro, "target_window_3", "")) if t.strip()]
+            if extra_titles and macro.use_target_window:
+                extra_backends = []
+                for title in extra_titles:
+                    h2 = find_window_hwnd(title)
+                    if h2:
+                        try: extra_backends.append(BackgroundInjector(h2))
+                        except Exception: pass
+                if extra_backends:
+                    return MultiWindowBackend([b] + extra_backends)
             return b
         except Exception as e:
             _LAST_BACKEND_ERROR = str(e) or repr(e)
@@ -1592,6 +1652,7 @@ class MainWindow(QMainWindow):
 
         self._setup_tray()
         self._rebuild_hotkeys()
+        self._update_active_label()
 
         if AUTO_UPDATE_ENABLED:
             # Run on a worker thread so startup isn't blocked by network
@@ -1781,6 +1842,29 @@ class MainWindow(QMainWindow):
         self._register_btn("del_macro", btn_del, "Delete macro")
         for b in (btn_new, btn_dup, btn_del): row.addWidget(b)
         row.addStretch()
+        # ── Log copy buttons ─────────────────────────────────────────────────
+        _diag_log_path  = Path.home() / ".macro_recorder" / "dll_hook.log"
+        _crash_log_path = _CRASH_LOG_PATH
+
+        btn_diag = QPushButton("📋 Diag Log")
+        btn_diag.setToolTip(f"Copy diagnostic log to clipboard\n{_diag_log_path}")
+        btn_diag.setStyleSheet(
+            "QPushButton { background: #313244; color: #a6adc8; "
+            "border: 1px solid #45475a; border-radius: 5px; padding: 4px 10px; font-size: 12px; }"
+            "QPushButton:hover { background: #45475a; color: #cdd6f4; }")
+        btn_diag.clicked.connect(self._copy_diag_log)
+        row.addWidget(btn_diag)
+
+        btn_crash = QPushButton("📋 Crash Log")
+        btn_crash.setToolTip(f"Copy crash log to clipboard\n{_crash_log_path}")
+        btn_crash.setStyleSheet(
+            "QPushButton { background: #313244; color: #f38ba8; "
+            "border: 1px solid #45475a; border-radius: 5px; padding: 4px 10px; font-size: 12px; }"
+            "QPushButton:hover { background: #45475a; color: #f5a3bb; }")
+        btn_crash.clicked.connect(self._copy_crash_log)
+        row.addWidget(btn_crash)
+
+        row.addSpacing(12)
         title = QLabel(f"QytCroRec v{__version__}")
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #89b4fa;")
         row.addWidget(title)
@@ -1852,38 +1936,103 @@ class MainWindow(QMainWindow):
         r2.addWidget(self._move_chk); r2.addStretch()
         gl.addLayout(r2)
 
-        # Row 3: target window (background injection)
-        r3 = QHBoxLayout()
-        self._use_target_chk = QCheckBox("Force Target Window")
-        self._use_target_chk.setToolTip(
-            "CHECKED  → Events are injected directly into the window below via\n"
-            "  SendMessage + AttachThreadInput.  Your mouse does NOT move and\n"
-            "  your keyboard focus is NOT stolen.\n\n"
-            "UNCHECKED → Events go to whatever window is currently active\n"
-            "  (uses SendInput — your mouse and keyboard WILL be affected).")
-        self._use_target_chk.stateChanged.connect(self._on_use_target_changed)
-        r3.addWidget(self._use_target_chk); r3.addSpacing(8)
-
-        self._win_title_lbl = QLabel("(none captured)")
-        self._win_title_lbl.setStyleSheet(
+        # Row 3: target windows (up to 3, only #1 required)
+        _win_lbl_style = (
             "color: #585b70; font-size: 12px; background: #181825;"
             "border: 1px solid #313244; border-radius: 4px; padding: 3px 10px;")
-        self._win_title_lbl.setMinimumWidth(220)
-        r3.addWidget(self._win_title_lbl, stretch=1); r3.addSpacing(8)
 
-        self._pick_btn = QPushButton("Pick Window…")
-        self._pick_btn.setEnabled(False)
-        self._pick_btn.setToolTip("Choose a target window from a list of all open windows (shows HWND)")
-        self._pick_btn.clicked.connect(self._pick_window)
-        r3.addWidget(self._pick_btn)
+        r3_hdr = QHBoxLayout()
+        self._use_target_chk = QCheckBox("Force Target Window(s)")
+        self._use_target_chk.setToolTip(
+            "CHECKED  → Events are injected directly into the configured window(s)\n"
+            "  via SendMessage + AttachThreadInput.  Mouse does NOT move and\n"
+            "  keyboard focus is NOT stolen.  Up to 3 windows supported.\n\n"
+            "UNCHECKED → Events go to whatever window is currently active\n"
+            "  (uses SendInput — real mouse & keyboard WILL be affected).")
+        self._use_target_chk.stateChanged.connect(self._on_use_target_changed)
+        r3_hdr.addWidget(self._use_target_chk)
+        r3_hdr.addStretch()
+        gl.addLayout(r3_hdr)
 
-        self._capture_btn = QPushButton("Capture Active Window (3 s)")
-        self._capture_btn.setEnabled(False)
+        # ── Window slot 1 (required) ─────────────────────────────────────────
+        r3a = QHBoxLayout(); r3a.setContentsMargins(20, 0, 0, 0)
+        lbl1 = QLabel("Win 1 (required):")
+        lbl1.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        lbl1.setFixedWidth(120)
+        r3a.addWidget(lbl1)
+        self._win_title_lbl = QLabel("(none)")
+        self._win_title_lbl.setStyleSheet(_win_lbl_style)
+        self._win_title_lbl.setMinimumWidth(180)
+        r3a.addWidget(self._win_title_lbl, stretch=1); r3a.addSpacing(4)
+        self._pick_btn = QPushButton("Pick…")
+        self._pick_btn.setEnabled(False); self._pick_btn.setMaximumWidth(60)
+        self._pick_btn.setToolTip("Choose target window from list")
+        self._pick_btn.clicked.connect(lambda: self._pick_window(slot=1))
+        r3a.addWidget(self._pick_btn)
+        self._capture_btn = QPushButton("Capture (3s)")
+        self._capture_btn.setEnabled(False); self._capture_btn.setMaximumWidth(100)
         self._capture_btn.clicked.connect(self._capture_window)
         self._register_btn("capture_window", self._capture_btn,
             "3-second countdown — switch to your target window before time runs out")
-        r3.addWidget(self._capture_btn); r3.addStretch()
-        gl.addLayout(r3)
+        r3a.addWidget(self._capture_btn)
+        self._drag_pick_btn1 = QPushButton("🎯")
+        self._drag_pick_btn1.setEnabled(False); self._drag_pick_btn1.setMaximumWidth(36)
+        self._drag_pick_btn1.setToolTip("Drag-pick: click any window on screen to select it")
+        self._drag_pick_btn1.clicked.connect(lambda: self._start_drag_pick(1))
+        r3a.addWidget(self._drag_pick_btn1)
+        gl.addLayout(r3a)
+
+        # ── Window slot 2 (optional) ─────────────────────────────────────────
+        r3b = QHBoxLayout(); r3b.setContentsMargins(20, 0, 0, 0)
+        lbl2 = QLabel("Win 2 (optional):")
+        lbl2.setStyleSheet("color: #585b70; font-size: 12px;")
+        lbl2.setFixedWidth(120)
+        r3b.addWidget(lbl2)
+        self._win2_title_lbl = QLabel("(none)")
+        self._win2_title_lbl.setStyleSheet(_win_lbl_style)
+        self._win2_title_lbl.setMinimumWidth(180)
+        r3b.addWidget(self._win2_title_lbl, stretch=1); r3b.addSpacing(4)
+        self._pick_btn2 = QPushButton("Pick…")
+        self._pick_btn2.setEnabled(False); self._pick_btn2.setMaximumWidth(60)
+        self._pick_btn2.setToolTip("Choose second target window from list")
+        self._pick_btn2.clicked.connect(lambda: self._pick_window(slot=2))
+        r3b.addWidget(self._pick_btn2)
+        self._clear_btn2 = QPushButton("Clear")
+        self._clear_btn2.setEnabled(False); self._clear_btn2.setMaximumWidth(60)
+        self._clear_btn2.clicked.connect(lambda: self._clear_window_slot(2))
+        r3b.addWidget(self._clear_btn2)
+        self._drag_pick_btn2 = QPushButton("🎯")
+        self._drag_pick_btn2.setEnabled(False); self._drag_pick_btn2.setMaximumWidth(36)
+        self._drag_pick_btn2.setToolTip("Drag-pick: click any window on screen to select it")
+        self._drag_pick_btn2.clicked.connect(lambda: self._start_drag_pick(2))
+        r3b.addWidget(self._drag_pick_btn2)
+        gl.addLayout(r3b)
+
+        # ── Window slot 3 (optional) ─────────────────────────────────────────
+        r3c = QHBoxLayout(); r3c.setContentsMargins(20, 0, 0, 0)
+        lbl3 = QLabel("Win 3 (optional):")
+        lbl3.setStyleSheet("color: #585b70; font-size: 12px;")
+        lbl3.setFixedWidth(120)
+        r3c.addWidget(lbl3)
+        self._win3_title_lbl = QLabel("(none)")
+        self._win3_title_lbl.setStyleSheet(_win_lbl_style)
+        self._win3_title_lbl.setMinimumWidth(180)
+        r3c.addWidget(self._win3_title_lbl, stretch=1); r3c.addSpacing(4)
+        self._pick_btn3 = QPushButton("Pick…")
+        self._pick_btn3.setEnabled(False); self._pick_btn3.setMaximumWidth(60)
+        self._pick_btn3.setToolTip("Choose third target window from list")
+        self._pick_btn3.clicked.connect(lambda: self._pick_window(slot=3))
+        r3c.addWidget(self._pick_btn3)
+        self._clear_btn3 = QPushButton("Clear")
+        self._clear_btn3.setEnabled(False); self._clear_btn3.setMaximumWidth(60)
+        self._clear_btn3.clicked.connect(lambda: self._clear_window_slot(3))
+        r3c.addWidget(self._clear_btn3)
+        self._drag_pick_btn3 = QPushButton("🎯")
+        self._drag_pick_btn3.setEnabled(False); self._drag_pick_btn3.setMaximumWidth(36)
+        self._drag_pick_btn3.setToolTip("Drag-pick: click any window on screen to select it")
+        self._drag_pick_btn3.clicked.connect(lambda: self._start_drag_pick(3))
+        r3c.addWidget(self._drag_pick_btn3)
+        gl.addLayout(r3c)
 
         # Row 4: input backend selector
         r4 = QHBoxLayout()
@@ -2150,7 +2299,7 @@ class MainWindow(QMainWindow):
         menu = QMenu()
         menu.addAction(QAction("Show", self, triggered=self.show))
         menu.addSeparator()
-        menu.addAction(QAction("Quit", self, triggered=QApplication.quit))
+        menu.addAction(QAction("Quit", self, triggered=self._quit_app))
         self._tray.setContextMenu(menu); self._tray.setToolTip("QytCroRec")
         self._tray.activated.connect(
             lambda r: self.show() if r == QSystemTrayIcon.ActivationReason.DoubleClick else None)
@@ -2186,9 +2335,14 @@ class MainWindow(QMainWindow):
         for w, v in [(self._move_chk, m.record_mouse_move),
                      (self._use_target_chk, m.use_target_window)]:
             w.blockSignals(True); w.setChecked(v); w.blockSignals(False)
-        self._win_title_lbl.setText(m.target_window_title or "(none captured)")
-        self._capture_btn.setEnabled(m.use_target_window)
-        self._pick_btn   .setEnabled(m.use_target_window)
+        self._win_title_lbl .setText(m.target_window_title or "(none)")
+        self._win2_title_lbl.setText(getattr(m, "target_window_2", "") or "(none)")
+        self._win3_title_lbl.setText(getattr(m, "target_window_3", "") or "(none)")
+        en = m.use_target_window
+        for btn in (self._capture_btn, self._pick_btn, self._drag_pick_btn1,
+                    self._pick_btn2, self._clear_btn2, self._drag_pick_btn2,
+                    self._pick_btn3, self._clear_btn3, self._drag_pick_btn3):
+            btn.setEnabled(en)
         # Load backend selection
         idx = next((i for i, (name, _, _) in enumerate(BACKEND_CHOICES)
                     if name == (m.input_backend or "auto")), 0)
@@ -2429,16 +2583,18 @@ class MainWindow(QMainWindow):
 
     def _on_use_target_changed(self, s: int):
         en = bool(s)
-        self._capture_btn.setEnabled(en)
-        self._pick_btn   .setEnabled(en)
+        for btn in (self._capture_btn, self._pick_btn, self._drag_pick_btn1,
+                    self._pick_btn2, self._clear_btn2, self._drag_pick_btn2,
+                    self._pick_btn3, self._clear_btn3, self._drag_pick_btn3):
+            btn.setEnabled(en)
         if not self._current: return
         self._current.use_target_window = en
         self._persist_current()
 
-    def _pick_window(self):
+    def _pick_window(self, slot: int = 1):
         """
         Open a dialog listing every visible window with HWND, PID, and title.
-        Selecting one sets it as the macro's target window.
+        Selecting one sets it as the macro's target window for the given slot (1/2/3).
         """
         if not self._current: return
         from PyQt6.QtWidgets import QDialog, QListWidget, QDialogButtonBox, QVBoxLayout
@@ -2446,22 +2602,27 @@ class MainWindow(QMainWindow):
         if not windows:
             QMessageBox.information(self, "Pick Window", "No visible windows found.")
             return
-        dlg = QDialog(self); dlg.setWindowTitle("Pick Target Window")
+        slot_label = {1: "Window 1 (required)", 2: "Window 2 (optional)", 3: "Window 3 (optional)"}
+        dlg = QDialog(self); dlg.setWindowTitle(f"Pick Target — {slot_label.get(slot,'')}")
         dlg.setMinimumSize(640, 460)
         v = QVBoxLayout(dlg)
         lbl = QLabel(
-            "Select the window to target.  Columns:  HWND  ·  PID  ·  Title")
+            f"Select <b>{slot_label.get(slot,'')}</b>.  "
+            "Columns:  HWND  ·  PID  ·  Title")
         lbl.setStyleSheet("color: #a6adc8;")
         v.addWidget(lbl)
         lw = QListWidget()
         lw.setStyleSheet(
             "QListWidget { background: #181825; border: 1px solid #313244; "
             "border-radius: 6px; padding: 4px; font-family: Consolas, monospace; }")
+        cur_title = {1: self._current.target_window_title,
+                     2: getattr(self._current, "target_window_2", ""),
+                     3: getattr(self._current, "target_window_3", "")}.get(slot, "")
         for hwnd, pid, title in windows:
             it = QListWidgetItem(f"0x{hwnd:08X}   PID {pid:>6}   {title}")
             it.setData(Qt.ItemDataRole.UserRole, (hwnd, pid, title))
             lw.addItem(it)
-            if title == self._current.target_window_title:
+            if title == cur_title:
                 lw.setCurrentItem(it)
         lw.itemDoubleClicked.connect(lambda _i: dlg.accept())
         v.addWidget(lw, 1)
@@ -2473,10 +2634,28 @@ class MainWindow(QMainWindow):
         item = lw.currentItem()
         if not item: return
         hwnd, pid, title = item.data(Qt.ItemDataRole.UserRole)
-        self._current.target_window_title = title
-        self._win_title_lbl.setText(title)
+        self._set_window_slot(slot, title)
         self._storage.save_macros(self._macros)
-        self._set_status(f"Target: 0x{hwnd:08X}  PID {pid}  {title}", "#89b4fa")
+        self._set_status(f"Win{slot}: 0x{hwnd:08X}  PID {pid}  {title}", "#89b4fa")
+
+    def _set_window_slot(self, slot: int, title: str):
+        """Write title into the correct macro field + update the corresponding label."""
+        if not self._current: return
+        if slot == 1:
+            self._current.target_window_title = title
+            self._win_title_lbl.setText(title or "(none)")
+        elif slot == 2:
+            self._current.target_window_2 = title
+            self._win2_title_lbl.setText(title or "(none)")
+        elif slot == 3:
+            self._current.target_window_3 = title
+            self._win3_title_lbl.setText(title or "(none)")
+
+    def _clear_window_slot(self, slot: int):
+        """Clear an optional window slot (2 or 3)."""
+        self._set_window_slot(slot, "")
+        self._storage.save_macros(self._macros)
+        self._set_status(f"Window {slot} cleared.", "#a6adc8")
 
     def _on_backend_changed(self, idx: int):
         if not self._current: return
@@ -2627,12 +2806,111 @@ class MainWindow(QMainWindow):
             title = get_foreground_title()
             if self._current:
                 self._current.target_window_title = title
-                self._win_title_lbl.setText(title or "(none captured)")
+                self._win_title_lbl.setText(title or "(none)")
                 self._storage.save_macros(self._macros)
-            self._capture_btn.setText("Capture Active Window (3 s)")
+            self._capture_btn.setText("Capture (3s)")
             self._capture_btn.setEnabled(
                 bool(self._current and self._current.use_target_window))
-            self._set_status(f"Target window set: {title or '(none)'}", "#89b4fa")
+            self._set_status(f"Win1 set: {title or '(none)'}", "#89b4fa")
+
+    # ── Drag-pick ─────────────────────────────────────────────────────────────
+
+    def _start_drag_pick(self, slot: int):
+        """
+        Minimise, show a hint overlay, capture the next left-click via pynput,
+        resolve the window under the cursor, then restore and set the slot.
+        """
+        if not self._current: return
+        self.showMinimized()
+        from PyQt6.QtWidgets import QDialog, QLabel, QVBoxLayout
+        hint = QDialog(self)
+        hint.setWindowTitle("Drag-Pick Window")
+        hint.setWindowFlags(
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.Tool)
+        hint.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        lbl = QLabel(
+            f"  🎯  Click any window to set it as <b>Window {slot}</b>.\n"
+            "  Press  ESC  to cancel.  ")
+        lbl.setStyleSheet(
+            "background: #313244; color: #cdd6f4; font-size: 14px; padding: 18px; "
+            "border: 2px solid #89b4fa; border-radius: 8px;")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        QVBoxLayout(hint).addWidget(lbl)
+        hint.adjustSize()
+        hint.move(100, 100)
+        hint.show()
+
+        result: list = [None]
+
+        def _on_click(x, y, button, pressed):
+            if not pressed or button != ms_lib.Button.left: return
+            hwnd = _u32.WindowFromPoint(ctypes.wintypes.POINT(int(x), int(y)))
+            # Walk to root (top-level) window
+            while True:
+                parent = _u32.GetParent(hwnd)
+                if not parent: break
+                hwnd = parent
+            n = _u32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                _u32.GetWindowTextW(hwnd, buf, n + 1)
+                result[0] = buf.value
+            mouse_listener.stop()
+            return False   # suppress the click from reaching the target
+
+        def _on_key(key):
+            if key == Key.esc:
+                mouse_listener.stop()
+            return False
+
+        mouse_listener = ms_lib.Listener(on_click=_on_click)
+        kb_listener    = kb_lib.Listener(on_press=_on_key)
+
+        def _wait():
+            mouse_listener.join()
+            kb_listener.stop()
+            QTimer.singleShot(0, _done)
+
+        def _done():
+            hint.close()
+            self.showNormal(); self.raise_(); self.activateWindow()
+            if result[0]:
+                self._set_window_slot(slot, result[0])
+                self._storage.save_macros(self._macros)
+                self._set_status(f"Win{slot} set via drag-pick: {result[0]}", "#89b4fa")
+            else:
+                self._set_status("Drag-pick cancelled.", "#a6adc8")
+
+        mouse_listener.start()
+        kb_listener.start()
+        threading.Thread(target=_wait, daemon=True).start()
+
+    # ── Log copy helpers ──────────────────────────────────────────────────────
+
+    def _copy_log_file(self, path: Path, label: str):
+        """Read `path` and put its contents on the clipboard. Show status."""
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        except Exception as e:
+            self._set_status(f"Cannot read {label}: {e}", "#f38ba8"); return
+        if not text.strip():
+            self._set_status(f"{label} is empty.", "#fab387"); return
+        QApplication.clipboard().setText(text)
+        lines = text.count("\n")
+        self._set_status(f"{label} copied ({lines} lines).", "#a6e3a1")
+
+    def _copy_diag_log(self):
+        self._copy_log_file(Path.home() / ".macro_recorder" / "dll_hook.log",
+                            "Diagnostic log")
+
+    def _copy_crash_log(self):
+        # Flush the faulthandler file before copying so latest content is on disk
+        try:
+            _crash_fp.flush()
+        except Exception: pass
+        self._copy_log_file(_CRASH_LOG_PATH, "Crash log")
 
     # ══════════════════════════════════════════════════════════════════════════
     # SECTION: Recording
@@ -2759,6 +3037,9 @@ class MainWindow(QMainWindow):
     def _on_play_started(self, mid: str):
         self._refresh_list(); self._update_play_btns()
         m = self._find(mid)
+        if m:
+            m.run_count += 1
+            self._storage.save_macros(self._macros)
         self._set_status(f"▶ Playing: {m.name if m else mid}", "#a6e3a1")
         self._update_active_label()
         sound_play_start(); speak(m.name if m else mid)
@@ -2829,7 +3110,9 @@ class MainWindow(QMainWindow):
 
     def _update_active_label(self):
         n = len(self._players)
-        self._active_lbl.setText(f"  {n} macro(s) running" if n else "")
+        total = sum(m.run_count for m in self._macros)
+        self._active_lbl.setText(f"  ▶ {total} execution{'s' if total != 1 else ''}" if total else "")
+        self._active_lbl.setToolTip(f"{n} macro(s) running" if n else "No macros running")
 
     def _tick_runtime(self):
         """Refresh the runtime label while any macro is playing."""
@@ -2897,8 +3180,23 @@ class MainWindow(QMainWindow):
         self._status.setText(msg)
         self._status.setStyleSheet(f"color: {color};")
 
+    def _quit_app(self):
+        """Fully clean up then exit — avoids PyInstaller temp-dir removal error."""
+        self._stop_all()
+        # Give player threads up to 1 s to shut down cleanly
+        deadline = time.perf_counter() + 1.0
+        while self._players and time.perf_counter() < deadline:
+            time.sleep(0.05)
+        self._hotkeys.stop(); self._app_hotkeys.stop()
+        self._storage.save_macros(self._macros)
+        # Close the faulthandler file so PyInstaller can clean _MEI* on exit
+        try:
+            faulthandler.disable()
+            _crash_fp.close()
+        except Exception: pass
+        QApplication.quit()
+
     def closeEvent(self, event):
-        self._stop_all(); self._hotkeys.stop(); self._app_hotkeys.stop()
         self._storage.save_macros(self._macros)
         event.ignore(); self.hide()
         self._tray.showMessage("QytCroRec",
@@ -2953,3 +3251,4 @@ if __name__ == "__main__":
 #   • Update checks run on a background thread; if the URL is unreachable
 #     they silently fail.  Startup never blocks waiting on the network.
 # ══════════════════════════════════════════════════════════════════════════════
+
