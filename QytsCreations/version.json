@@ -1,4 +1,4 @@
 {
-  "version": "1.19",
-  "notes": "v1.19: execution count tracker in status bar, hover shows active macro count."
+  "version": "1.20",
+  "notes": "v1.20: bundle hook DLLs and injector exes into distributed .exe so Detours backend works out-of-the-box."
 }

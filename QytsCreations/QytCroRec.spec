@@ -5,7 +5,12 @@ a = Analysis(
     ['QytCroRec.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('hooks/dinput_hook/dinput_hook_x64.dll', 'hooks/dinput_hook'),
+        ('hooks/dinput_hook/dinput_hook_x86.dll', 'hooks/dinput_hook'),
+        ('hooks/dinput_hook/injector_x64.exe',    'hooks/dinput_hook'),
+        ('hooks/dinput_hook/injector_x86.exe',    'hooks/dinput_hook'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
