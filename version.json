@@ -1,4 +1,4 @@
 {
-  "version": "1.22",
-  "notes": "v1.22: Pixel Bot Guard — per-event OCR screen check, red-flag location detection, auto-correction key or macro, skip-leading-keyboard restart logic, dedicated Guard tab."
+  "version": "1.23",
+  "notes": "v1.23: Pillow + pytesseract + Tesseract-OCR binary bundled into exe via updated spec; build_setup.bat auto-installs deps and downloads Tesseract if missing; auto-configures bundled tesseract path at runtime."
 }

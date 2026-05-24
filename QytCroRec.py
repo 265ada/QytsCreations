@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.22"
+__version__ = "1.23"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -77,6 +77,27 @@ try:
     _TESSERACT_OK = True
 except ImportError:
     _TESSERACT_OK = False
+
+def _configure_bundled_tesseract():
+    """
+    When running as a PyInstaller single-file exe, tesseract.exe and tessdata/
+    are extracted to sys._MEIPASS.  Point pytesseract + TESSDATA_PREFIX there
+    so OCR works out-of-the-box without any user installation.
+    """
+    if not _TESSERACT_OK:
+        return
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return   # not a bundled exe — use whatever is on PATH
+    tess_exe = Path(meipass) / "tesseract.exe"
+    tessdata = Path(meipass) / "tessdata"
+    if tess_exe.exists():
+        _pytesseract.pytesseract.tesseract_cmd = str(tess_exe)
+    if tessdata.exists():
+        # TESSDATA_PREFIX must point to the *parent* of the tessdata folder
+        os.environ.setdefault("TESSDATA_PREFIX", meipass)
+
+_configure_bundled_tesseract()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2242,12 +2263,23 @@ class MainWindow(QMainWindow):
         lay   = QVBoxLayout(inner); lay.setContentsMargins(10, 10, 10, 10); lay.setSpacing(10)
 
         # ── OCR availability notice ──────────────────────────────────────────
+        _bundled = bool(getattr(sys, "_MEIPASS", None))
         if not _PILLOW_OK or not _TESSERACT_OK:
-            missing = []
-            if not _PILLOW_OK:   missing.append("Pillow  (pip install Pillow)")
-            if not _TESSERACT_OK: missing.append("pytesseract  (pip install pytesseract) + Tesseract-OCR binary")
-            note = QLabel(
-                "⚠  Pixel Bot Guard requires:\n" + "\n".join(f"   • {m}" for m in missing))
+            if _bundled:
+                # Running from exe but OCR imports still failed — unusual
+                note_text = (
+                    "⚠  OCR libraries failed to load inside the bundle.\n"
+                    "   Try rebuilding with  build_setup.bat  to ensure\n"
+                    "   Pillow, pytesseract, and Tesseract are included.")
+            else:
+                missing = []
+                if not _PILLOW_OK:    missing.append("Pillow          →  pip install Pillow")
+                if not _TESSERACT_OK: missing.append(
+                    "pytesseract     →  pip install pytesseract\n"
+                    "   Tesseract binary  →  run  build_setup.bat  (bundles it automatically)")
+                note_text = "⚠  Pixel Bot Guard requires:\n" + "\n".join(
+                    f"   • {m}" for m in missing)
+            note = QLabel(note_text)
             note.setStyleSheet(
                 "color: #f38ba8; background: #2a1a1a; border: 1px solid #f38ba8; "
                 "border-radius: 5px; padding: 8px; font-size: 12px;")
@@ -3131,12 +3163,17 @@ class MainWindow(QMainWindow):
     def _test_guard_ocr(self):
         """Capture the configured region right now and show the OCR result."""
         if not _PILLOW_OK or not _TESSERACT_OK:
-            QMessageBox.warning(self, "Pixel Guard",
-                "Pillow and/or pytesseract are not installed.\n\n"
-                "Install them:\n"
-                "  pip install Pillow pytesseract\n\n"
-                "Also ensure the Tesseract binary is on your PATH:\n"
-                "  https://github.com/UB-Mannheim/tesseract/wiki")
+            if getattr(sys, "_MEIPASS", None):
+                msg = ("OCR libraries failed inside the bundle.\n"
+                       "Rebuild using  build_setup.bat  to re-bundle correctly.")
+            else:
+                msg = ("Pillow / pytesseract not installed.\n\n"
+                       "Run  build_setup.bat  — it installs everything and\n"
+                       "bundles Tesseract into the exe automatically.\n\n"
+                       "Or for dev/script mode:\n"
+                       "  pip install Pillow pytesseract\n"
+                       "  + Tesseract binary: https://github.com/UB-Mannheim/tesseract/wiki")
+            QMessageBox.warning(self, "Pixel Guard — OCR Not Available", msg)
             return
         m = self._current
         hwnd = None
