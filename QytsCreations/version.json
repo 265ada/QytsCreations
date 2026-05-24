@@ -1,4 +1,4 @@
 {
-  "version": "1.27",
+  "version": "1.28",
   "notes": "v1.26: Full event editor — add/edit/duplicate/reorder/scale events directly in the Events tab. Insert keyboard, mouse click/move/scroll, and delay events. Key capture button. Delay column shows ms gap per event (double-click to edit inline). Right-click context menu. Marvel background, glass UI, vivid Record/Play/Stop buttons. CI build caching for faster builds."
 }

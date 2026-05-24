@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.27"
+__version__ = "1.28"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -1346,18 +1346,9 @@ def create_backend(macro: "Macro") -> Optional[InputBackend]:
             if b is None:
                 _LAST_BACKEND_ERROR = f"Backend '{choice}' is not available on this machine."
                 return None
-            # If extra target windows are configured, wrap in MultiWindowBackend
-            extra_titles = [t for t in (getattr(macro, "target_window_2", ""),
-                                        getattr(macro, "target_window_3", "")) if t.strip()]
-            if extra_titles and macro.use_target_window:
-                extra_backends = []
-                for title in extra_titles:
-                    h2 = find_window_hwnd(title)
-                    if h2:
-                        try: extra_backends.append(BackgroundInjector(h2))
-                        except Exception: pass
-                if extra_backends:
-                    return MultiWindowBackend([b] + extra_backends)
+            # NOTE: Multi-window is now handled via separate Lanes (each with
+            # their own Macro + backend). The old target_window_2/3 approach
+            # is removed — each lane independently hooks its own PID.
             return b
         except Exception as e:
             _LAST_BACKEND_ERROR = str(e) or repr(e)
@@ -4783,8 +4774,14 @@ class MainWindow(QMainWindow):
         item.setText(new_name)
         self._group_list.blockSignals(False)
 
+    def _on_lane_tab_changed(self, idx: int):
+        """Remember which lane tab the user is on so _load_group can restore it."""
+        if idx < self._lane_tabs.count() - 1:   # exclude Shortcuts tab
+            self._last_lane_tab = idx
+
     def _on_group_row_changed(self, row: int):
         if 0 <= row < len(self._groups):
+            self._last_lane_tab = 0   # switching groups always starts at Primary
             self._load_group(self._groups[row])
 
     def _load_group(self, g: MacroGroup):
@@ -4815,18 +4812,29 @@ class MainWindow(QMainWindow):
             self._lane_tabs.addTab(lw, lane_labels[i])
 
         self._lane_tabs.addTab(shortcuts_widget, "⌨ Shortcuts")
-        self._lane_tabs.setCurrentIndex(0)
+        # Restore previously active lane tab (don't snap back to Primary every time)
+        prev_tab = getattr(self, "_last_lane_tab", 0)
+        self._lane_tabs.setCurrentIndex(min(prev_tab, self._lane_tabs.count() - 2))
+        self._lane_tabs.currentChanged.connect(self._on_lane_tab_changed)
         self._rebuild_hotkeys()
         self._update_play_btns()
 
     def _on_lane_changed(self):
         self._storage.save_groups(self._groups)
         self._rebuild_hotkeys()
-        # Refresh group name from primary lane name if group name matches default
-        if self._cur_group and self._lane_widgets:
-            pname = self._lane_widgets[0].macro.name
-            # Sync group list item display
-            self._refresh_group_list()
+        # Lightweight group-list refresh: only update the label text of the
+        # current group item — do NOT call _refresh_group_list() because that
+        # triggers setCurrentRow → _load_group which destroys + recreates all
+        # LaneWidgets and resets the active tab back to Primary.
+        if self._cur_group:
+            gid = self._cur_group.id
+            for i in range(self._group_list.count()):
+                item = self._group_list.item(i)
+                if item and item.data(Qt.ItemDataRole.UserRole) == gid:
+                    self._group_list.blockSignals(True)
+                    item.setText(self._cur_group.name)
+                    self._group_list.blockSignals(False)
+                    break
 
     # ══════════════════════════════════════════════════════════════════════════
     # SECTION: System Tray
