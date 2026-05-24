@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.26"
+__version__ = "1.27"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2238,20 +2238,20 @@ QPushButton#btn_record:disabled {
     border: 1px solid rgba(200,60,90,0.25);
 }
 
-/* ── PLAY button — vivid green, always visible ───────────────────────────── */
+/* ── PLAY button — vivid yellow, always visible ──────────────────────────── */
 QPushButton#btn_play {
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-        stop:0 #3de87a, stop:1 #1db954);
-    color: #0a1a0e; border: 2px solid #55f090;
+        stop:0 #ffe44d, stop:1 #e6a800);
+    color: #1a1000; border: 2px solid #ffe97a;
     border-radius: 7px; font-weight: bold; font-size: 13px;
     padding: 7px 18px;
 }
 QPushButton#btn_play:hover  { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-    stop:0 #5af090, stop:1 #28d060); border-color: #90ffb8; }
-QPushButton#btn_play:pressed { background: #138a3a; }
+    stop:0 #fff07a, stop:1 #f0b800); border-color: #fff5aa; }
+QPushButton#btn_play:pressed { background: #b87d00; }
 QPushButton#btn_play:disabled {
-    background: rgba(30,150,70,0.25); color: rgba(100,220,140,0.42);
-    border: 1px solid rgba(50,180,90,0.22);
+    background: rgba(200,150,0,0.22); color: rgba(255,220,80,0.40);
+    border: 1px solid rgba(220,170,0,0.20);
 }
 
 /* ── STOP button — vivid orange, always visible ──────────────────────────── */
@@ -2789,13 +2789,6 @@ class LaneWidget(QWidget):
         self._name_edit.setText(self._macro.name)
         self._name_edit.editingFinished.connect(self._on_name_changed)
         r1.addWidget(self._name_edit)
-        r1.addSpacing(12)
-        r1.addWidget(QLabel("Hotkey:"))
-        self._hotkey_edit = QLineEdit(placeholderText="e.g. ctrl+f5")
-        self._hotkey_edit.setMaximumWidth(130)
-        self._hotkey_edit.setText(self._macro.trigger_hotkey)
-        self._hotkey_edit.editingFinished.connect(self._on_hotkey_changed)
-        r1.addWidget(self._hotkey_edit)
         lay.addLayout(r1)
 
         # Repeat + speed + mouse
@@ -3094,8 +3087,7 @@ class LaneWidget(QWidget):
 
     def _load(self):
         m = self._macro
-        for w, v in [(self._name_edit, m.name),
-                     (self._hotkey_edit, m.trigger_hotkey)]:
+        for w, v in [(self._name_edit, m.name)]:
             w.blockSignals(True); w.setText(v); w.blockSignals(False)
         for w, v in [(self._repeat_spin, m.repeat_count),
                      (self._speed_spin, m.speed_multiplier)]:
@@ -3788,7 +3780,9 @@ class LaneWidget(QWidget):
 
 class MainWindow(QMainWindow):
 
-    _global_shortcut_sig = pyqtSignal(str)
+    _global_shortcut_sig  = pyqtSignal(str)
+    _update_available_sig = pyqtSignal(object, dict)   # (AutoUpdater, info_dict)
+    _update_done_sig      = pyqtSignal(bool)           # ok
 
     def __init__(self):
         super().__init__()
@@ -3821,6 +3815,8 @@ class MainWindow(QMainWindow):
         self._hotkeys     = HotkeyManager(self._hotkey_fired)
         self._app_hotkeys = HotkeyManager(self._app_hotkey_fired_raw)
         self._global_shortcut_sig.connect(self._app_hotkey_fired_gui)
+        self._update_available_sig.connect(self._prompt_update)
+        self._update_done_sig.connect(self._on_update_done)
 
         self._build_ui()
         self._apply_shortcuts()
@@ -3944,22 +3940,20 @@ class MainWindow(QMainWindow):
                 "or prefer to update manually from GitHub Releases.")
 
     def _check_for_updates(self):
+        """Runs in a daemon thread — uses signal to marshal result to GUI thread."""
         # Re-read pref from disk (checkbox may not be built yet on first call)
         if not self._storage.load_pref("auto_update", True):
             return
         upd = AutoUpdater(__version__, UPDATE_VERSION_URL, UPDATE_SCRIPT_URL,
                           exe_url=UPDATE_EXE_URL)
-        info = upd.check()
-        if not info: return
-        # Marshal the prompt to the GUI thread via a signal-safe mechanism
-        self._pending_update = (upd, info)
-        QTimer.singleShot(500, self._show_pending_update)
-
-    def _show_pending_update(self):
-        if not hasattr(self, "_pending_update"): return
-        upd, info = self._pending_update
-        del self._pending_update
-        self._prompt_update(upd, info)
+        try:
+            info = upd.check()
+        except Exception as e:
+            print(f"[autoupdate] check failed: {e}")
+            return
+        if info:
+            # Emit signal — this is thread-safe and marshals to GUI thread
+            self._update_available_sig.emit(upd, info)
 
     def _prompt_update(self, upd: "AutoUpdater", info: dict):
         msg = QMessageBox(self)
@@ -3981,12 +3975,13 @@ class MainWindow(QMainWindow):
         def _do_download():
             target = Path(__file__).resolve()
             ok = upd.download_and_install(target)
-            QTimer.singleShot(0, lambda: self._on_update_done(ok, upd))
+            self._update_done_sig.emit(ok)   # signal marshals to GUI thread safely
         threading.Thread(target=_do_download, daemon=True).start()
 
-    def _on_update_done(self, ok: bool, upd: "AutoUpdater"):
+    def _on_update_done(self, ok: bool):
         if ok:
             self._set_status("Update downloaded — restarting…", "#a6e3a1")
+            # singleShot here is fine — we ARE on the GUI thread (called via signal)
             QTimer.singleShot(600, self._restart_app)
         else:
             QMessageBox.warning(self, "Update Failed",
