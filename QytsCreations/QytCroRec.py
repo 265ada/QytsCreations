@@ -56,8 +56,11 @@ from PyQt6.QtWidgets import (
     QLineEdit, QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QSystemTrayIcon, QMenu, QCheckBox, QTabWidget,
     QStatusBar, QMessageBox, QGroupBox, QKeySequenceEdit, QComboBox,
+    QDialog, QDialogButtonBox, QRadioButton, QButtonGroup,
+    QStackedWidget, QFormLayout, QScrollArea, QFrame, QSizePolicy,
+    QAbstractItemView, QToolButton, QInputDialog,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QRectF
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QRectF, QPoint
 from PyQt6.QtGui import (
     QIcon, QColor, QFont, QPixmap, QPainter, QAction,
     QShortcut, QKeySequence,
@@ -397,10 +400,11 @@ def user_hotkey_to_pynput(s: str) -> str:
 qt_to_pynput_hotkey = user_hotkey_to_pynput
 
 def event_summary(ev: dict) -> str:
-    d, t = ev["data"], ev["event_type"]
+    d, t = ev.get("data", {}), ev.get("event_type", "")
     if t in ("key_press", "key_release"): return d.get("key", "?")
+    if t == "delay": return f"wait {d.get('ms', 0)} ms"
     tag = "client" if d.get("coord_space") == "client" else "screen"
-    xy  = f"({d['x']}, {d['y']}) [{tag}]"
+    xy  = f"({d.get('x',0)}, {d.get('y',0)}) [{tag}]"
     if t == "mouse_move": return xy
     if t == "mouse_click":
         arr = "↓" if d.get("pressed") else "↑"
@@ -1673,6 +1677,9 @@ class PlayerThread(QThread):
             elif t == "mouse_scroll":
                 x, y = self._resolve_xy(d)
                 b.mouse_scroll(x, y, int(d["dx"]), int(d["dy"]))
+            elif t == "delay":
+                ms = int(d.get("ms", 0))
+                if ms > 0: _sleep_until(time.perf_counter() + ms/1000, self._stop)
         except Exception as e:
             _log_crash(f"[playback] {t}: {e}")
 
@@ -1900,6 +1907,9 @@ class ChainPlayerThread(QThread):
                 x, y = _xy(); b.mouse_button(x, y, d["button"], d["pressed"])
             elif t == "mouse_scroll":
                 x, y = _xy(); b.mouse_scroll(x, y, int(d["dx"]), int(d["dy"]))
+            elif t == "delay":
+                ms = int(d.get("ms", 0))
+                if ms > 0: _sleep_until(time.perf_counter() + ms/1000, self._stop)
         except Exception as e:
             _log_crash(f"[chain fire] {t}: {e}")
 
@@ -2244,7 +2254,336 @@ EVENT_COLORS = {
     "mouse_move":   "#6c7086",
     "mouse_click":  "#a6e3a1",
     "mouse_scroll": "#f9e2af",
+    "delay":        "#cba6f7",
 }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EVENT EDIT DIALOG
+# ══════════════════════════════════════════════════════════════════════════════
+
+_MOUSE_BUTTONS = ["left", "right", "middle", "x1", "x2"]
+_MOUSE_BTN_MAP = {
+    "left":   "Button.left",   "right":  "Button.right",
+    "middle": "Button.middle", "x1":     "Button.x1",
+    "x2":     "Button.x2",
+}
+_MOUSE_BTN_RMAP = {v: k for k, v in _MOUSE_BTN_MAP.items()}
+
+
+class _KeyCaptureBtn(QPushButton):
+    """Button that grabs the next keypress and emits it as a string."""
+    key_captured = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__("▶ Press a key…", parent)
+        self._capturing = False
+        self.setCheckable(True)
+        self.toggled.connect(self._on_toggle)
+
+    def _on_toggle(self, on):
+        self._capturing = on
+        self.setText("⏹ Listening… (press key)" if on else "▶ Press a key…")
+        if on:
+            self.setFocus()
+            self.grabKeyboard()
+        else:
+            self.releaseKeyboard()
+
+    def keyPressEvent(self, event):
+        if not self._capturing:
+            return super().keyPressEvent(event)
+        from PyQt6.QtCore import Qt as _Qt
+        key = event.key()
+        text = event.text()
+        # Map Qt keys to pynput-style strings
+        _special = {
+            _Qt.Key.Key_Return: "enter", _Qt.Key.Key_Enter: "enter",
+            _Qt.Key.Key_Backspace: "backspace", _Qt.Key.Key_Delete: "delete",
+            _Qt.Key.Key_Escape: "esc", _Qt.Key.Key_Tab: "tab",
+            _Qt.Key.Key_Space: "space", _Qt.Key.Key_Up: "up",
+            _Qt.Key.Key_Down: "down", _Qt.Key.Key_Left: "left",
+            _Qt.Key.Key_Right: "right", _Qt.Key.Key_Home: "home",
+            _Qt.Key.Key_End: "end", _Qt.Key.Key_PageUp: "page_up",
+            _Qt.Key.Key_PageDown: "page_down", _Qt.Key.Key_Insert: "insert",
+            _Qt.Key.Key_F1: "f1",  _Qt.Key.Key_F2:  "f2",
+            _Qt.Key.Key_F3: "f3",  _Qt.Key.Key_F4:  "f4",
+            _Qt.Key.Key_F5: "f5",  _Qt.Key.Key_F6:  "f6",
+            _Qt.Key.Key_F7: "f7",  _Qt.Key.Key_F8:  "f8",
+            _Qt.Key.Key_F9: "f9",  _Qt.Key.Key_F10: "f10",
+            _Qt.Key.Key_F11: "f11", _Qt.Key.Key_F12: "f12",
+            _Qt.Key.Key_Shift: "shift", _Qt.Key.Key_Control: "ctrl",
+            _Qt.Key.Key_Alt: "alt", _Qt.Key.Key_Super_L: "cmd",
+            _Qt.Key.Key_CapsLock: "caps_lock",
+            _Qt.Key.Key_NumLock: "num_lock",
+            _Qt.Key.Key_ScrollLock: "scroll_lock",
+            _Qt.Key.Key_Print: "print_screen",
+            _Qt.Key.Key_Pause: "pause",
+        }
+        result = _special.get(key) or (text.lower() if text.strip() else None)
+        if result:
+            self.setChecked(False)
+            self.key_captured.emit(result)
+        event.accept()
+
+
+class EventEditDialog(QDialog):
+    """Full-featured editor for a single macro event dict."""
+
+    # Event types offered in the type selector
+    _TYPES = ["key_press", "key_release", "mouse_click",
+              "mouse_move", "mouse_scroll", "delay"]
+
+    def __init__(self, event: dict, prev_timestamp: float, parent=None):
+        super().__init__(parent)
+        self._ev   = copy.deepcopy(event)
+        self._prev = prev_timestamp          # timestamp of previous event (for delay calc)
+        self.setWindowTitle("Edit Event")
+        self.setMinimumWidth(480)
+        self._build()
+        self._load()
+
+    # ── Build ─────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        main = QVBoxLayout(self)
+        main.setSpacing(12)
+
+        # ── Delay before this event ───────────────────────────────────────────
+        delay_grp = QGroupBox("Timing")
+        fl = QFormLayout(delay_grp)
+        self._delay_spin = QSpinBox()
+        self._delay_spin.setRange(0, 60_000_000)
+        self._delay_spin.setSuffix("  ms")
+        self._delay_spin.setMaximumWidth(160)
+        self._delay_spin.setToolTip("Pause BEFORE this event fires (milliseconds)")
+        fl.addRow("Delay before:", self._delay_spin)
+        main.addWidget(delay_grp)
+
+        # ── Type selector ─────────────────────────────────────────────────────
+        type_grp = QGroupBox("Event Type")
+        tl = QHBoxLayout(type_grp)
+        self._type_combo = QComboBox()
+        self._type_combo.addItems(self._TYPES)
+        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
+        tl.addWidget(self._type_combo); tl.addStretch()
+        main.addWidget(type_grp)
+
+        # ── Stacked pages per type ────────────────────────────────────────────
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._page_key())        # 0 key_press
+        self._stack.addWidget(self._page_key())        # 1 key_release  (same layout)
+        self._stack.addWidget(self._page_mouse_click())# 2 mouse_click
+        self._stack.addWidget(self._page_mouse_xy())   # 3 mouse_move
+        self._stack.addWidget(self._page_scroll())     # 4 mouse_scroll
+        self._stack.addWidget(self._page_delay())      # 5 delay
+        main.addWidget(self._stack)
+
+        # ── Pixel Guard ───────────────────────────────────────────────────────
+        self._guard_chk = QCheckBox("🛡  Pixel Guard checkpoint (abort chain if flag detected)")
+        main.addWidget(self._guard_chk)
+
+        # ── Buttons ───────────────────────────────────────────────────────────
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        main.addWidget(bb)
+
+    def _sep(self) -> QFrame:
+        f = QFrame(); f.setFrameShape(QFrame.Shape.HLine)
+        f.setStyleSheet("color: rgba(139,180,248,0.20);")
+        return f
+
+    def _page_key(self) -> QWidget:
+        """Shared page for key_press and key_release."""
+        w = QWidget()
+        fl = QFormLayout(w); fl.setSpacing(8)
+        key_row = QHBoxLayout()
+        self._key_edit = QLineEdit()
+        self._key_edit.setPlaceholderText("e.g.  a   ctrl   f5   space")
+        self._key_edit.setMaximumWidth(200)
+        key_row.addWidget(self._key_edit)
+        self._key_cap_btn = _KeyCaptureBtn()
+        self._key_cap_btn.key_captured.connect(lambda k: self._key_edit.setText(k))
+        key_row.addWidget(self._key_cap_btn)
+        key_row.addStretch()
+        fl.addRow("Key:", key_row)
+
+        act_row = QHBoxLayout()
+        self._key_press_rb   = QRadioButton("Press ↓")
+        self._key_release_rb = QRadioButton("Release ↑")
+        self._key_press_rb.setChecked(True)
+        act_row.addWidget(self._key_press_rb)
+        act_row.addWidget(self._key_release_rb)
+        act_row.addStretch()
+        fl.addRow("Action:", act_row)
+        return w
+
+    def _page_mouse_click(self) -> QWidget:
+        w = QWidget()
+        fl = QFormLayout(w); fl.setSpacing(8)
+
+        btn_row = QHBoxLayout()
+        self._mbtn_combo = QComboBox()
+        self._mbtn_combo.addItems([b.capitalize() for b in _MOUSE_BUTTONS])
+        btn_row.addWidget(self._mbtn_combo); btn_row.addStretch()
+        fl.addRow("Button:", btn_row)
+
+        act_row = QHBoxLayout()
+        self._mpress_rb   = QRadioButton("Press ↓")
+        self._mrelease_rb = QRadioButton("Release ↑")
+        self._mpress_rb.setChecked(True)
+        act_row.addWidget(self._mpress_rb); act_row.addWidget(self._mrelease_rb)
+        act_row.addStretch()
+        fl.addRow("Action:", act_row)
+
+        fl.addRow(self._sep())
+        self._mcx_spin, self._mcy_spin, self._mc_space = self._xy_row(fl)
+        return w
+
+    def _page_mouse_xy(self) -> QWidget:
+        w = QWidget()
+        fl = QFormLayout(w); fl.setSpacing(8)
+        self._mmx_spin, self._mmy_spin, self._mm_space = self._xy_row(fl)
+        return w
+
+    def _page_scroll(self) -> QWidget:
+        w = QWidget()
+        fl = QFormLayout(w); fl.setSpacing(8)
+        self._msx_spin, self._msy_spin, self._ms_space = self._xy_row(fl)
+
+        delta_row = QHBoxLayout()
+        self._msdx_spin = QSpinBox(); self._msdx_spin.setRange(-999, 999)
+        self._msdy_spin = QSpinBox(); self._msdy_spin.setRange(-999, 999)
+        self._msdy_spin.setValue(-3)
+        for w2, lbl in [(self._msdx_spin, "H:"), (self._msdy_spin, "V:")]:
+            delta_row.addWidget(QLabel(lbl)); delta_row.addWidget(w2)
+        delta_row.addWidget(QLabel("(positive = right/up)"))
+        delta_row.addStretch()
+        fl.addRow("Scroll Δ:", delta_row)
+        return w
+
+    def _page_delay(self) -> QWidget:
+        w = QWidget()
+        fl = QFormLayout(w); fl.setSpacing(8)
+        note = QLabel("Pure delay — no mouse/keyboard action.\n"
+                       "Set the 'Delay before' value above to control wait time.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #a6adc8; font-style: italic;")
+        fl.addRow(note)
+        return w
+
+    def _xy_row(self, fl: QFormLayout):
+        row = QHBoxLayout()
+        xs = QSpinBox(); xs.setRange(-32768, 65535); xs.setMaximumWidth(100)
+        ys = QSpinBox(); ys.setRange(-32768, 65535); ys.setMaximumWidth(100)
+        row.addWidget(QLabel("X:")); row.addWidget(xs)
+        row.addWidget(QLabel("Y:")); row.addWidget(ys)
+        row.addStretch()
+        fl.addRow("Coordinates:", row)
+        sp_row = QHBoxLayout()
+        space_combo = QComboBox()
+        space_combo.addItems(["client (window-relative)", "screen (absolute)"])
+        sp_row.addWidget(space_combo); sp_row.addStretch()
+        fl.addRow("Space:", sp_row)
+        return xs, ys, space_combo
+
+    # ── Load / Save ───────────────────────────────────────────────────────────
+
+    def _load(self):
+        ev, t = self._ev, self._ev.get("event_type", "key_press")
+        d = ev.get("data", {})
+
+        # Delay
+        delay_ms = max(0, round((ev.get("timestamp", 0) - self._prev) * 1000))
+        self._delay_spin.setValue(delay_ms)
+
+        # Type combo
+        idx = self._TYPES.index(t) if t in self._TYPES else 0
+        self._type_combo.setCurrentIndex(idx)
+        self._stack.setCurrentIndex(idx)
+
+        # Key fields
+        key = d.get("key", "")
+        self._key_edit.setText(key)
+        self._key_press_rb.setChecked(t == "key_press")
+        self._key_release_rb.setChecked(t == "key_release")
+
+        # Mouse click
+        raw_btn = str(d.get("button", "Button.left"))
+        btn_name = _MOUSE_BTN_RMAP.get(raw_btn, "left")
+        self._mbtn_combo.setCurrentIndex(
+            _MOUSE_BUTTONS.index(btn_name) if btn_name in _MOUSE_BUTTONS else 0)
+        self._mpress_rb.setChecked(bool(d.get("pressed", True)))
+        self._mrelease_rb.setChecked(not bool(d.get("pressed", True)))
+        self._mcx_spin.setValue(int(d.get("x", 0)))
+        self._mcy_spin.setValue(int(d.get("y", 0)))
+        self._mc_space.setCurrentIndex(0 if d.get("coord_space") == "client" else 1)
+
+        # Mouse move
+        self._mmx_spin.setValue(int(d.get("x", 0)))
+        self._mmy_spin.setValue(int(d.get("y", 0)))
+        self._mm_space.setCurrentIndex(0 if d.get("coord_space") == "client" else 1)
+
+        # Scroll
+        self._msx_spin.setValue(int(d.get("x", 0)))
+        self._msy_spin.setValue(int(d.get("y", 0)))
+        self._ms_space.setCurrentIndex(0 if d.get("coord_space") == "client" else 1)
+        self._msdx_spin.setValue(int(d.get("dx", 0)))
+        self._msdy_spin.setValue(int(d.get("dy", -3)))
+
+        # Guard
+        self._guard_chk.setChecked(bool(ev.get("pixel_guard", False)))
+
+    def _on_type_changed(self, idx):
+        self._stack.setCurrentIndex(idx)
+        # Sync key action radios when switching between press/release
+        t = self._TYPES[idx]
+        if t == "key_press":   self._key_press_rb.setChecked(True)
+        if t == "key_release": self._key_release_rb.setChecked(True)
+
+    def get_event(self, new_timestamp: float) -> dict:
+        """Return the edited event dict with updated timestamp."""
+        idx = self._type_combo.currentIndex()
+        t   = self._TYPES[idx]
+        delay_ms = self._delay_spin.value()
+        ts = self._prev + delay_ms / 1000.0
+
+        if t in ("key_press", "key_release"):
+            # Honour action radio
+            if self._key_press_rb.isChecked():   t = "key_press"
+            else:                                 t = "key_release"
+            d = {"key": self._key_edit.text().strip() or "a"}
+
+        elif t == "mouse_click":
+            btn_name = _MOUSE_BUTTONS[self._mbtn_combo.currentIndex()]
+            space = "client" if self._mc_space.currentIndex() == 0 else "screen"
+            d = {"x": self._mcx_spin.value(), "y": self._mcy_spin.value(),
+                 "coord_space": space,
+                 "button": _MOUSE_BTN_MAP[btn_name],
+                 "pressed": self._mpress_rb.isChecked()}
+
+        elif t == "mouse_move":
+            space = "client" if self._mm_space.currentIndex() == 0 else "screen"
+            d = {"x": self._mmx_spin.value(), "y": self._mmy_spin.value(),
+                 "coord_space": space}
+
+        elif t == "mouse_scroll":
+            space = "client" if self._ms_space.currentIndex() == 0 else "screen"
+            d = {"x": self._msx_spin.value(), "y": self._msy_spin.value(),
+                 "coord_space": space,
+                 "dx": self._msdx_spin.value(), "dy": self._msdy_spin.value()}
+
+        else:  # delay
+            d = {}
+
+        return {
+            "timestamp":   ts,
+            "event_type":  t,
+            "data":        d,
+            "pixel_guard": self._guard_chk.isChecked(),
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2311,23 +2650,36 @@ class LaneWidget(QWidget):
     def add_event(self, ev: dict):
         """Append one live-captured event to the table (during recording)."""
         self._macro.events.append(ev)
+        idx = len(self._macro.events) - 1
         row = self._table.rowCount()
         self._table.insertRow(row)
-        n = len(self._macro.events)
-        self._table.setItem(row, 0, QTableWidgetItem(str(n)))
-        self._table.setItem(row, 1, QTableWidgetItem(f"{ev['timestamp']:.3f}"))
+        _ro = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+        num_it = QTableWidgetItem(str(idx + 1)); num_it.setFlags(_ro)
+        self._table.setItem(row, 0, num_it)
+
+        self._table.setItem(row, 1, self._make_delay_item(idx))
+
         ti = QTableWidgetItem(ev["event_type"])
         ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
+        ti.setFlags(_ro)
         self._table.setItem(row, 2, ti)
-        self._table.setItem(row, 3, QTableWidgetItem(event_summary(ev)))
+
+        det = QTableWidgetItem(event_summary(ev)); det.setFlags(_ro)
+        self._table.setItem(row, 3, det)
+
         gitem = QTableWidgetItem()
         gitem.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable |
                        Qt.ItemFlag.ItemIsUserCheckable)
         gitem.setCheckState(Qt.CheckState.Unchecked)
         self._table.setItem(row, 4, gitem)
-        self._row_event_idx.append(n - 1)
+
+        ph = QTableWidgetItem(""); ph.setFlags(_ro)
+        self._table.setItem(row, 5, ph)
+
+        self._row_event_idx.append(idx)
         self._table.scrollToBottom()
-        self._ev_count.setText(f"{n} events")
+        self._ev_count.setText(f"{idx + 1} events")
 
     def highlight_event(self, idx: int):
         if 0 <= idx < self._table.rowCount():
@@ -2510,51 +2862,136 @@ class LaneWidget(QWidget):
         scroll.setStyleSheet("QScrollArea { border: none; }")
         return scroll
 
+    # ── Events tab helpers ────────────────────────────────────────────────────
+
+    def _tb_btn(self, text, tip, slot, *, color=None) -> QPushButton:
+        b = QPushButton(text)
+        b.setToolTip(tip)
+        b.setMaximumHeight(28)
+        b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        b.clicked.connect(slot)
+        if color:
+            b.setStyleSheet(
+                f"QPushButton{{background:{color};color:#fff;border:1px solid {color};"
+                f"border-radius:5px;padding:2px 10px;font-weight:bold;}}"
+                f"QPushButton:hover{{filter:brightness(1.2);}}"
+                f"QPushButton:disabled{{opacity:0.35;}}")
+        return b
+
     def _build_events(self) -> QWidget:
         w = QWidget()
-        lay = QVBoxLayout(w); lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(5)
+        lay = QVBoxLayout(w); lay.setContentsMargins(6, 6, 6, 6); lay.setSpacing(4)
 
-        filt_row = QHBoxLayout()
+        # ── Filter bar ────────────────────────────────────────────────────────
+        filt_row = QHBoxLayout(); filt_row.setSpacing(6)
         filt_row.addWidget(QLabel("Show:"))
-        for et, label in [("key_press","key press"),("key_release","key release"),
-                          ("mouse_move","mouse move"),("mouse_click","mouse click"),
-                          ("mouse_scroll","mouse scroll")]:
+        for et, label in [("key_press","Key ↓"),("key_release","Key ↑"),
+                          ("mouse_move","Move"),("mouse_click","Click"),
+                          ("mouse_scroll","Scroll"),("delay","Delay")]:
             cb = QCheckBox(label); cb.setChecked(True)
-            cb.setStyleSheet(f"QCheckBox {{ color: {EVENT_COLORS.get(et,'#cdd6f4')}; }}")
+            cb.setStyleSheet(f"QCheckBox {{ color: {EVENT_COLORS.get(et,'#cdd6f4')}; "
+                             f"font-size:11px; }}")
             cb.stateChanged.connect(self._apply_filter)
             filt_row.addWidget(cb)
             self._ev_filters[et] = cb
         filt_row.addStretch()
         lay.addLayout(filt_row)
 
+        # ── Action toolbar ────────────────────────────────────────────────────
+        tb1 = QHBoxLayout(); tb1.setSpacing(4)
+
+        # Reorder
+        self._btn_ev_up   = self._tb_btn("↑", "Move selected up",   self._ev_move_up)
+        self._btn_ev_down = self._tb_btn("↓", "Move selected down",  self._ev_move_down)
+        # Edit / Dup / Del
+        self._btn_ev_edit = self._tb_btn("✎ Edit",      "Edit selected event (or double-click)",
+                                          self._ev_edit_selected)
+        self._btn_ev_dup  = self._tb_btn("⎘ Duplicate", "Duplicate selected events",
+                                          self._ev_duplicate)
+        self._btn_ev_del  = self._tb_btn("✕ Delete",    "Delete selected events",
+                                          self._del_selected_events)
+        for b in (self._btn_ev_up, self._btn_ev_down, self._btn_ev_edit,
+                  self._btn_ev_dup, self._btn_ev_del):
+            tb1.addWidget(b)
+
+        sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.VLine)
+        sep1.setStyleSheet("color: rgba(139,180,248,0.25);")
+        tb1.addWidget(sep1)
+
+        # Add new events
+        tb1.addWidget(self._tb_btn("＋ Key",    "Insert keyboard event",  self._ev_add_key,
+                                    color="#5577cc"))
+        tb1.addWidget(self._tb_btn("＋ Click",  "Insert mouse click",     self._ev_add_click,
+                                    color="#55aa77"))
+        tb1.addWidget(self._tb_btn("＋ Move",   "Insert mouse move",      self._ev_add_move,
+                                    color="#777755"))
+        tb1.addWidget(self._tb_btn("＋ Scroll", "Insert mouse scroll",    self._ev_add_scroll,
+                                    color="#775577"))
+        tb1.addWidget(self._tb_btn("⏱ Delay",  "Insert a wait/delay",    self._ev_add_delay,
+                                    color="#886644"))
+
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.VLine)
+        sep2.setStyleSheet("color: rgba(139,180,248,0.25);")
+        tb1.addWidget(sep2)
+
+        tb1.addWidget(self._tb_btn("⇄ Scale…", "Scale all delays by factor",
+                                    self._ev_scale_timings))
+        tb1.addWidget(self._tb_btn("Clear All", "Clear all events",
+                                    self._clear_events))
+        tb1.addStretch()
+        lay.addLayout(tb1)
+
+        # ── Table ─────────────────────────────────────────────────────────────
         self._table = QTableWidget()
-        self._table.setColumnCount(5)
-        self._table.setHorizontalHeaderLabels(["#", "Time (s)", "Type", "Details", "🛡"])
+        self._table.setColumnCount(6)
+        self._table.setHorizontalHeaderLabels(
+            ["#", "Δ ms", "Type", "Details", "🛡", ""])
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        hh.resizeSection(0, 50); hh.resizeSection(1, 100); hh.resizeSection(2, 120)
-        hh.resizeSection(4, 34)
-        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._table.setAlternatingRowColors(True)
-        self._table.setStyleSheet("QTableWidget { alternate-background-color: #1a1a2a; }")
-        self._table.verticalHeader().setVisible(True)
-        self._table.verticalHeader().setSectionsMovable(True)
-        self._table.verticalHeader().sectionMoved.connect(self._on_section_moved)
-        self._table.cellClicked.connect(self._on_cell_clicked)
-        self._table.itemChanged.connect(self._on_guard_item_changed)
-        lay.addWidget(self._table)
+        hh.resizeSection(0, 40)
+        hh.resizeSection(1, 80)
+        hh.resizeSection(2, 110)
+        hh.resizeSection(4, 30); hh.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        hh.resizeSection(5, 0);  hh.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        hh.setStretchLastSection(False)
 
-        ea = QHBoxLayout()
-        btn_clr = QPushButton("Clear All"); btn_clr.clicked.connect(self._clear_events)
-        btn_del = QPushButton("Delete Selected"); btn_del.clicked.connect(self._del_selected_events)
-        ea.addWidget(btn_clr); ea.addWidget(btn_del); ea.addStretch()
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked)
+        self._table.setAlternatingRowColors(True)
+        self._table.setStyleSheet(
+            "QTableWidget { alternate-background-color: rgba(26,26,42,0.55); }")
+        self._table.verticalHeader().setVisible(False)
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._table_context_menu)
+        self._table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        self._table.cellClicked.connect(self._on_cell_clicked)
+        self._table.itemChanged.connect(self._on_item_changed_dispatch)
+        lay.addWidget(self._table, 1)
+
+        # ── Footer ────────────────────────────────────────────────────────────
+        foot = QHBoxLayout()
         self._ev_count = QLabel("0 events")
         self._ev_count.setStyleSheet("color: #585b70; font-size: 11px;")
-        ea.addWidget(self._ev_count)
-        lay.addLayout(ea)
+        foot.addWidget(self._ev_count); foot.addStretch()
+        foot.addWidget(QLabel("Drag rows to reorder  ·  Double-click to edit  ·  Right-click for more"))
+        lay.addLayout(foot)
         return w
+
+    # ── Table population ──────────────────────────────────────────────────────
+
+    def _ev_delay_ms(self, idx: int) -> int:
+        """Return delay in ms before event at index idx."""
+        evs = self._macro.events
+        if idx <= 0 or not evs: return round(evs[0]["timestamp"] * 1000) if evs else 0
+        return max(0, round((evs[idx]["timestamp"] - evs[idx-1]["timestamp"]) * 1000))
+
+    def _make_delay_item(self, idx: int) -> QTableWidgetItem:
+        it = QTableWidgetItem(str(self._ev_delay_ms(idx)))
+        it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        it.setForeground(QColor("#f9e2af"))
+        it.setToolTip("Delay before this event (ms) — double-click to edit")
+        return it
 
     def _build_guard(self) -> QWidget:
         from PyQt6.QtWidgets import QScrollArea
@@ -2700,12 +3137,27 @@ class LaneWidget(QWidget):
         groups = self._build_groups(m.events)
         gbs = {g[0]: g for g in groups}
 
+        def _ro(*flags):
+            base = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+            return base
+
         def _guard_item(ev_dict):
             it = QTableWidgetItem()
             it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable |
                         Qt.ItemFlag.ItemIsUserCheckable)
             it.setCheckState(
                 Qt.CheckState.Checked if ev_dict.get("pixel_guard") else Qt.CheckState.Unchecked)
+            return it
+
+        def _type_item(et):
+            ti = QTableWidgetItem(et)
+            ti.setForeground(QColor(EVENT_COLORS.get(et, "#cdd6f4")))
+            ti.setFlags(_ro())
+            return ti
+
+        def _plain(text):
+            it = QTableWidgetItem(text)
+            it.setFlags(_ro())
             return it
 
         i = 0
@@ -2716,46 +3168,43 @@ class LaneWidget(QWidget):
                 self._table.insertRow(row)
                 hdr = QTableWidgetItem(f"▶  ×{count}")
                 hdr.setForeground(QColor(EVENT_COLORS.get(et, "#cdd6f4")))
-                hdr.setBackground(QColor("#252535"))
-                hdr.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                hdr.setBackground(QColor(30, 30, 50, 160))
+                hdr.setFlags(_ro())
                 self._table.setItem(row, 0, hdr)
                 t0 = m.events[start]["timestamp"]
                 t1 = m.events[start+count-1]["timestamp"]
-                self._table.setItem(row, 1, QTableWidgetItem(f"{t0:.3f}—{t1:.3f}"))
-                tit = QTableWidgetItem(et)
-                tit.setForeground(QColor(EVENT_COLORS.get(et, "#cdd6f4")))
-                self._table.setItem(row, 2, tit)
-                self._table.setItem(row, 3, QTableWidgetItem(
-                    f"({count} similar events — click ▶ to expand)"))
-                ph = QTableWidgetItem("—"); ph.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                self._table.setItem(row, 1, _plain(f"{round((t1-t0)*1000)}ms"))
+                self._table.setItem(row, 2, _type_item(et))
+                self._table.setItem(row, 3, _plain(
+                    f"({count} similar — click ▶ to expand)"))
+                ph = QTableWidgetItem("—"); ph.setFlags(_ro())
                 ph.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._table.setItem(row, 4, ph)
+                self._table.setItem(row, 5, _plain(""))
                 self._row_event_idx.append(-1)
                 self._groups[row] = {"start": start, "count": count,
                                      "et": et, "collapsed": True}
                 for j in range(count):
                     ev = m.events[i+j]
                     r = self._table.rowCount(); self._table.insertRow(r)
-                    self._table.setItem(r, 0, QTableWidgetItem(str(i+j+1)))
-                    self._table.setItem(r, 1, QTableWidgetItem(f"{ev['timestamp']:.3f}"))
-                    ti = QTableWidgetItem(ev["event_type"])
-                    ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
-                    self._table.setItem(r, 2, ti)
-                    self._table.setItem(r, 3, QTableWidgetItem(event_summary(ev)))
+                    self._table.setItem(r, 0, _plain(str(i+j+1)))
+                    self._table.setItem(r, 1, self._make_delay_item(i+j))
+                    self._table.setItem(r, 2, _type_item(ev["event_type"]))
+                    self._table.setItem(r, 3, _plain(event_summary(ev)))
                     self._table.setItem(r, 4, _guard_item(ev))
+                    self._table.setItem(r, 5, _plain(""))
                     self._row_event_idx.append(i+j)
                     self._table.setRowHidden(r, True)
                 i += count
             else:
                 ev = m.events[i]
                 row = self._table.rowCount(); self._table.insertRow(row)
-                self._table.setItem(row, 0, QTableWidgetItem(str(i+1)))
-                self._table.setItem(row, 1, QTableWidgetItem(f"{ev['timestamp']:.3f}"))
-                ti = QTableWidgetItem(ev["event_type"])
-                ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
-                self._table.setItem(row, 2, ti)
-                self._table.setItem(row, 3, QTableWidgetItem(event_summary(ev)))
+                self._table.setItem(row, 0, _plain(str(i+1)))
+                self._table.setItem(row, 1, self._make_delay_item(i))
+                self._table.setItem(row, 2, _type_item(ev["event_type"]))
+                self._table.setItem(row, 3, _plain(event_summary(ev)))
                 self._table.setItem(row, 4, _guard_item(ev))
+                self._table.setItem(row, 5, _plain(""))
                 self._row_event_idx.append(i)
                 i += 1
 
@@ -2775,7 +3224,6 @@ class LaneWidget(QWidget):
 
     def _apply_filter(self):
         allowed = {et for et, cb in self._ev_filters.items() if cb.isChecked()}
-        shown = 0
         for row in range(self._table.rowCount()):
             if row in self._groups:
                 g = self._groups[row]
@@ -2789,7 +3237,6 @@ class LaneWidget(QWidget):
                 for hr, g in self._groups.items())
             vis = (ev["event_type"] in allowed) and not in_collapsed
             self._table.setRowHidden(row, not vis)
-            if vis: shown += 1
 
     def _on_cell_clicked(self, row, col):
         if row in self._groups:
@@ -2799,13 +3246,47 @@ class LaneWidget(QWidget):
             if hdr: hdr.setText(f"{'▶' if g['collapsed'] else '▼'}  ×{g['count']}")
             allowed = {et for et, cb in self._ev_filters.items() if cb.isChecked()}
             for offset in range(1, g["count"]+1):
-                r = row+offset
+                r = row + offset
                 if r < self._table.rowCount():
                     vis = (not g["collapsed"]) and (g["et"] in allowed)
                     self._table.setRowHidden(r, not vis)
 
+    def _on_cell_double_clicked(self, row, col):
+        """Open edit dialog on double-click (unless clicking the group header or guard col)."""
+        if row in self._groups: return
+        if col == 4: return  # guard checkbox — handled by Qt
+        if col == 1:
+            # Inline delay edit
+            self._ev_edit_delay_inline(row)
+            return
+        self._ev_edit_row(row)
+
+    def _ev_edit_delay_inline(self, row):
+        """Quick inline editor for the delay cell."""
+        if row in self._groups: return
+        idx = self._row_event_idx[row] if 0 <= row < len(self._row_event_idx) else -1
+        if idx < 0 or idx >= len(self._macro.events): return
+        current = self._ev_delay_ms(idx)
+        val, ok = QInputDialog.getInt(self, "Edit Delay",
+                                       f"Delay before event #{idx+1} (ms):",
+                                       current, 0, 60_000_000, 10)
+        if not ok: return
+        # Shift this event and all subsequent events by the delta
+        delta = (val - current) / 1000.0
+        for j in range(idx, len(self._macro.events)):
+            self._macro.events[j]["timestamp"] += delta
+        self._fill_table()
+        self.changed.emit(self._macro.id)
+
+    def _on_item_changed_dispatch(self, item):
+        """Route itemChanged — guard checkbox (col 4) or delay edit (col 1)."""
+        col = item.column()
+        row = item.row()
+        if col == 4:
+            self._on_guard_item_changed(item)
+
     def _on_guard_item_changed(self, item):
-        if item.column() != 4 or not self._macro: return
+        if not self._macro: return
         row = item.row()
         if row in self._groups: return
         idx = self._row_event_idx[row] if 0 <= row < len(self._row_event_idx) else -1
@@ -2814,23 +3295,217 @@ class LaneWidget(QWidget):
             item.checkState() == Qt.CheckState.Checked)
         self.changed.emit(self._macro.id)
 
-    def _on_section_moved(self, logical_idx, old_visual, new_visual):
-        if not self._macro: return
-        order = []
-        vh = self._table.verticalHeader()
-        for vrow in range(self._table.rowCount()):
-            logical = vh.logicalIndex(vrow)
-            ev_idx = self._row_event_idx[logical] if 0 <= logical < len(self._row_event_idx) else -1
-            if ev_idx >= 0: order.append(ev_idx)
-        if not order: return
-        try:
-            self._macro.events = [self._macro.events[i] for i in order]
-        except IndexError: return
-        vh.blockSignals(True)
-        for i in range(self._table.rowCount()): vh.moveSection(vh.visualIndex(i), i)
-        vh.blockSignals(False)
+    # ── Event editor actions ──────────────────────────────────────────────────
+
+    def _selected_event_indices(self) -> list:
+        """Return sorted list of unique event indices from selected rows."""
+        seen, out = set(), []
+        for item in self._table.selectedItems():
+            row = item.row()
+            if row in self._groups: continue
+            idx = self._row_event_idx[row] if 0 <= row < len(self._row_event_idx) else -1
+            if idx >= 0 and idx not in seen:
+                seen.add(idx); out.append(idx)
+        return sorted(out)
+
+    def _ev_edit_row(self, row: int):
+        if row in self._groups: return
+        idx = self._row_event_idx[row] if 0 <= row < len(self._row_event_idx) else -1
+        if idx < 0 or idx >= len(self._macro.events): return
+        prev_ts = self._macro.events[idx - 1]["timestamp"] if idx > 0 else 0.0
+        dlg = EventEditDialog(self._macro.events[idx], prev_ts, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        new_ev = dlg.get_event(self._macro.events[idx]["timestamp"])
+        # Shift subsequent events if delay changed
+        old_ts  = self._macro.events[idx]["timestamp"]
+        new_ts  = new_ev["timestamp"]
+        delta   = new_ts - old_ts
+        self._macro.events[idx] = new_ev
+        if delta != 0:
+            for j in range(idx + 1, len(self._macro.events)):
+                self._macro.events[j]["timestamp"] += delta
         self._fill_table()
         self.changed.emit(self._macro.id)
+
+    def _ev_edit_selected(self):
+        rows = [self._table.row(i) for i in self._table.selectedItems()]
+        rows = list(dict.fromkeys(rows))  # unique, stable order
+        rows = [r for r in rows if r not in self._groups and
+                0 <= self._row_event_idx[r] < len(self._macro.events)]
+        if not rows: return
+        self._ev_edit_row(rows[0])
+
+    def _ev_insert(self, ev: dict, after_idx: int = -1):
+        """Insert event after after_idx (or at end if -1)."""
+        evs = self._macro.events
+        if after_idx < 0 or after_idx >= len(evs):
+            # Append — timestamp after last event
+            ts = (evs[-1]["timestamp"] + 0.5) if evs else 0.0
+            ev["timestamp"] = ts
+            evs.append(ev)
+        else:
+            # Insert between after_idx and after_idx+1
+            ts_prev = evs[after_idx]["timestamp"]
+            ts_next = evs[after_idx + 1]["timestamp"] if after_idx + 1 < len(evs) else ts_prev + 0.5
+            ev["timestamp"] = ts_prev + (ts_next - ts_prev) / 2
+            evs.insert(after_idx + 1, ev)
+        self._fill_table()
+        self.changed.emit(self._macro.id)
+
+    def _ev_insert_position(self) -> int:
+        """Return the event index after which to insert, or -1 for end."""
+        sel = self._selected_event_indices()
+        return sel[-1] if sel else -1
+
+    def _ev_open_add_dialog(self, template: dict):
+        """Open editor for a new event, then insert it."""
+        pos = self._ev_insert_position()
+        evs = self._macro.events
+        prev_ts = evs[pos]["timestamp"] if 0 <= pos < len(evs) else (evs[-1]["timestamp"] if evs else 0.0)
+        dlg = EventEditDialog(template, prev_ts, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        new_ev = dlg.get_event(prev_ts + 0.5)
+        self._ev_insert(new_ev, pos)
+
+    def _ev_add_key(self):
+        self._ev_open_add_dialog(
+            {"timestamp": 0, "event_type": "key_press", "data": {"key": "a"}, "pixel_guard": False})
+
+    def _ev_add_click(self):
+        self._ev_open_add_dialog(
+            {"timestamp": 0, "event_type": "mouse_click",
+             "data": {"x": 0, "y": 0, "coord_space": "screen",
+                      "button": "Button.left", "pressed": True}, "pixel_guard": False})
+
+    def _ev_add_move(self):
+        self._ev_open_add_dialog(
+            {"timestamp": 0, "event_type": "mouse_move",
+             "data": {"x": 0, "y": 0, "coord_space": "screen"}, "pixel_guard": False})
+
+    def _ev_add_scroll(self):
+        self._ev_open_add_dialog(
+            {"timestamp": 0, "event_type": "mouse_scroll",
+             "data": {"x": 0, "y": 0, "coord_space": "screen", "dx": 0, "dy": -3},
+             "pixel_guard": False})
+
+    def _ev_add_delay(self):
+        val, ok = QInputDialog.getInt(self, "Insert Delay",
+                                       "Delay duration (ms):", 500, 1, 60_000_000, 100)
+        if not ok: return
+        pos = self._ev_insert_position()
+        evs = self._macro.events
+        prev_ts = evs[pos]["timestamp"] if 0 <= pos < len(evs) else (evs[-1]["timestamp"] if evs else 0.0)
+        new_ev = {"timestamp": prev_ts + val / 1000.0,
+                  "event_type": "delay",
+                  "data": {"ms": val},
+                  "pixel_guard": False}
+        # Shift subsequent events forward by val ms
+        ins_at = pos + 1 if pos >= 0 else len(evs)
+        for j in range(ins_at, len(evs)):
+            evs[j]["timestamp"] += val / 1000.0
+        evs.insert(ins_at, new_ev)
+        self._fill_table()
+        self.changed.emit(self._macro.id)
+
+    def _ev_duplicate(self):
+        idxs = self._selected_event_indices()
+        if not idxs: return
+        evs = self._macro.events
+        duped = [copy.deepcopy(evs[i]) for i in idxs]
+        # Append after the last selected, shifting timestamps
+        ins_base = max(idxs) + 1
+        gap = 0.1
+        for k, ev in enumerate(duped):
+            ev["timestamp"] = evs[max(idxs)]["timestamp"] + gap * (k + 1)
+        for j in range(ins_base, len(evs)):
+            evs[j]["timestamp"] += gap * len(duped)
+        for k, ev in enumerate(duped):
+            evs.insert(ins_base + k, ev)
+        self._fill_table()
+        self.changed.emit(self._macro.id)
+
+    def _ev_move_up(self):
+        idxs = self._selected_event_indices()
+        if not idxs or idxs[0] == 0: return
+        evs = self._macro.events
+        for i in idxs:
+            evs[i-1], evs[i] = evs[i], evs[i-1]
+        # Re-sort timestamps to keep monotonic order
+        self._renorm_timestamps()
+        self._fill_table()
+        self.changed.emit(self._macro.id)
+
+    def _ev_move_down(self):
+        idxs = self._selected_event_indices()
+        if not idxs or idxs[-1] >= len(self._macro.events) - 1: return
+        evs = self._macro.events
+        for i in reversed(idxs):
+            evs[i], evs[i+1] = evs[i+1], evs[i]
+        self._renorm_timestamps()
+        self._fill_table()
+        self.changed.emit(self._macro.id)
+
+    def _renorm_timestamps(self):
+        """After a reorder, re-apply timestamps so they stay monotonically increasing."""
+        evs = self._macro.events
+        if not evs: return
+        # Keep relative delays, just re-sequence
+        delays = []
+        for i, ev in enumerate(evs):
+            if i == 0:
+                delays.append(ev["timestamp"])
+            else:
+                delays.append(max(0.0, ev["timestamp"] - evs[i-1]["timestamp"]))
+        t = 0.0
+        for i, (ev, d) in enumerate(zip(evs, delays)):
+            t += d
+            ev["timestamp"] = round(t, 6)
+
+    def _ev_scale_timings(self):
+        val, ok = QInputDialog.getDouble(self, "Scale Timings",
+                                          "Multiply all delays by factor\n"
+                                          "(0.5 = 2× faster, 2.0 = 2× slower):",
+                                          1.0, 0.01, 100.0, 2)
+        if not ok or val == 1.0: return
+        evs = self._macro.events
+        if not evs: return
+        t = 0.0
+        for i, ev in enumerate(evs):
+            delay = (ev["timestamp"] - evs[i-1]["timestamp"]) if i > 0 else ev["timestamp"]
+            t += delay * val
+            ev["timestamp"] = round(t, 6)
+        self._fill_table()
+        self.changed.emit(self._macro.id)
+
+    def _table_context_menu(self, pos: QPoint):
+        row = self._table.rowAt(pos.y())
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu{background:rgba(22,22,38,0.97);color:#e8eaf6;"
+            "border:1px solid rgba(139,180,248,0.30);border-radius:6px;padding:4px;}"
+            "QMenu::item{padding:6px 22px;border-radius:3px;}"
+            "QMenu::item:selected{background:rgba(69,71,90,0.90);}"
+            "QMenu::separator{background:rgba(139,180,248,0.15);height:1px;margin:3px 8px;}")
+
+        if row >= 0 and row not in self._groups:
+            menu.addAction("✎  Edit event…",       self._ev_edit_selected)
+            menu.addAction("⎘  Duplicate",          self._ev_duplicate)
+            menu.addSeparator()
+            menu.addAction("↑  Move up",            self._ev_move_up)
+            menu.addAction("↓  Move down",          self._ev_move_down)
+            menu.addSeparator()
+            menu.addAction("✕  Delete selected",    self._del_selected_events)
+            menu.addSeparator()
+
+        menu.addAction("＋  Insert Key…",    self._ev_add_key)
+        menu.addAction("＋  Insert Click…",  self._ev_add_click)
+        menu.addAction("＋  Insert Move…",   self._ev_add_move)
+        menu.addAction("＋  Insert Scroll…", self._ev_add_scroll)
+        menu.addAction("⏱  Insert Delay…",  self._ev_add_delay)
+        menu.addSeparator()
+        menu.addAction("⇄  Scale timings…", self._ev_scale_timings)
+        menu.addAction("Clear All",           self._clear_events)
+        menu.exec(self._table.viewport().mapToGlobal(pos))
 
     def _clear_events(self):
         if QMessageBox.question(
@@ -2842,12 +3517,7 @@ class LaneWidget(QWidget):
             self.changed.emit(self._macro.id)
 
     def _del_selected_events(self):
-        idxs = set()
-        for item in self._table.selectedIndexes():
-            r = item.row()
-            if 0 <= r < len(self._row_event_idx):
-                e = self._row_event_idx[r]
-                if e >= 0: idxs.add(e)
+        idxs = self._selected_event_indices()
         for e in sorted(idxs, reverse=True):
             if e < len(self._macro.events): self._macro.events.pop(e)
         self._fill_table()
