@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.60"
+__version__ = "1.61"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -1879,70 +1879,80 @@ class ChainPlayerThread(QThread):
         reps       = primary.repeat_count or 10_000_000
         all_macros = self._all_macros()
 
-        for rep in range(reps):
-            if self._stop.is_set():
-                break
+        # Collect active lanes once (enabled + have events; Primary always included)
+        active = [
+            (lane_idx, lane)
+            for lane_idx, lane in enumerate(g.lanes)
+            if lane_idx == 0 or (lane.lane_enabled and lane.events)
+        ]
 
-            # Collect lanes that should fire this rep
-            active = [
-                (lane_idx, lane)
-                for lane_idx, lane in enumerate(g.lanes)
-                if lane_idx == 0 or (lane.lane_enabled and lane.events)
-            ]
+        # ── Pre-resolve one unique HWND per lane (done once, not per rep) ────
+        # find_window_hwnd does substring match; two lanes with the same window
+        # title (e.g. two game accounts) would both get the first match.
+        # Resolve sequentially, skip already-claimed HWNDs so Primary gets
+        # match[0], Secondary gets match[1], Third gets match[2].
+        _claimed: set  = set()
+        _lane_hwnds: dict = {}
+        for _li, _ln in active:
+            if _ln.use_target_window and _ln.target_window_title:
+                _h = find_window_hwnd(_ln.target_window_title, _claimed)
+                if _h:
+                    _claimed.add(_h)
+                    _lane_hwnds[_li] = _h
 
-            rep_label = f"rep {rep+1}/{reps if primary.repeat_count else '∞'}"
-
-            # ── Pre-resolve one unique HWND per lane ─────────────────────────
-            # find_window_hwnd does a substring match so two lanes with the
-            # same window title (e.g. two game accounts) would BOTH find the
-            # same first-matching HWND.  Resolve sequentially and skip already-
-            # claimed HWNDs so Primary gets match[0], Secondary gets match[1].
-            _claimed_hwnds: set = set()
-            _lane_hwnds: dict   = {}
-            for _li, _ln in active:
-                if _ln.use_target_window and _ln.target_window_title:
-                    _h = find_window_hwnd(_ln.target_window_title, _claimed_hwnds)
-                    if _h:
-                        _claimed_hwnds.add(_h)
-                        _lane_hwnds[_li] = _h
-
-            # ── Fire ALL active lanes simultaneously ──────────────────────────
-            def _run_lane_worker(lane_idx, lane, hwnd_pre=None):
+        # ── Each lane gets its OWN independent rep loop ───────────────────────
+        # Lanes start simultaneously but do NOT wait for each other between
+        # reps.  Primary's repeat count governs when the chain stops — when
+        # Primary finishes its reps the stop event fires so all lanes exit.
+        # Secondary/Third cycle at their own pace (a faster lane just loops
+        # more; a slower lane might be mid-rep when Primary finishes).
+        def _lane_loop(lane_idx, lane, hwnd_pre=None):
+            lane_reps = reps if lane_idx == 0 else 10_000_000
+            for rep in range(lane_reps):
+                if self._stop.is_set():
+                    break
+                rep_label = (f"rep {rep+1}/"
+                             f"{reps if primary.repeat_count else '∞'}")
                 try:
                     self.lane_started.emit(g.id, lane_idx, lane.id)
                     self.log_sig.emit(
-                        f"[{g.name}] Lane {lane_idx} '{lane.name}' starting ({rep_label})")
+                        f"[{g.name}] Lane {lane_idx} '{lane.name}' starting"
+                        f" ({rep_label})")
                     ok = self._run_one_lane(lane_idx, lane, all_macros,
                                            hwnd_override=hwnd_pre)
                     if ok:
                         self.log_sig.emit(
-                            f"[{g.name}] Lane {lane_idx} '{lane.name}' complete.")
+                            f"[{g.name}] Lane {lane_idx} '{lane.name}'"
+                            f" complete.")
                     else:
                         self.log_sig.emit(
-                            f"[{g.name}] Lane {lane_idx} '{lane.name}' stopped early.")
+                            f"[{g.name}] Lane {lane_idx} '{lane.name}'"
+                            f" stopped early.")
                 except Exception as e:
-                    # Never let a worker crash silently — would deadlock t.join().
-                    _log_crash(f"[lane worker {lane_idx}] {e}\n{traceback.format_exc()}")
+                    _log_crash(
+                        f"[lane worker {lane_idx}] {e}\n"
+                        f"{traceback.format_exc()}")
                     self.log_sig.emit(
-                        f"[{g.name}] Lane {lane_idx} '{lane.name}' CRASHED: {e}")
+                        f"[{g.name}] Lane {lane_idx} '{lane.name}'"
+                        f" CRASHED: {e}")
+                    break   # don't loop on a crashing lane
                 finally:
-                    # ALWAYS emit lane_stopped so UI button states reset, even on crash.
                     try: self.lane_stopped.emit(g.id, lane_idx, lane.id)
                     except Exception: pass
+            # Primary done → signal all other lanes to stop
+            if lane_idx == 0:
+                self._stop.set()
 
-            threads = [
-                threading.Thread(target=_run_lane_worker,
-                                 args=(li, ln, _lane_hwnds.get(li)),
-                                 daemon=True)
-                for li, ln in active
-            ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-
-            if self._stop.is_set():
-                break
+        threads = [
+            threading.Thread(target=_lane_loop,
+                             args=(li, ln, _lane_hwnds.get(li)),
+                             daemon=True)
+            for li, ln in active
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
     def _run_one_lane(self, lane_idx: int, lane: "Macro",
                       all_macros: list,

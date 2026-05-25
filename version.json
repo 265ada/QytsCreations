@@ -1,4 +1,4 @@
 {
-  "version": "1.60",
-  "notes": "v1.60: Fix dual-window PID collision. When lanes share the same window title (two game accounts), each lane now claims a distinct HWND. Primary gets the 1st match, Secondary the 2nd, etc. Duplicate-PID log and wrong-window input injection eliminated."
+  "version": "1.61",
+  "notes": "v1.61: Lanes now run fully independently. Each lane has its own rep loop and does not wait for other lanes between reps. Primary's rep count still controls when the chain stops. Faster lanes cycle more; slower lanes finish their current rep when Primary ends."
 }
