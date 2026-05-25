@@ -120,7 +120,12 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX compression DISABLED — it triggers Windows Defender false-positives
+    # ("packer detected"), causing Defender to quarantine python311.dll mid-
+    # extraction at first launch.  Symptom: "Failed to load Python DLL
+    # _MEI<rand>\python311.dll  LoadLibrary: The specified module could not
+    # be found."  Trade-off: exe is ~30 MB larger but launches reliably.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

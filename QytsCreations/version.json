@@ -1,4 +1,4 @@
 {
-  "version": "1.49",
-  "notes": "v1.49: Updater no longer leaves versioned orphan exes in your install folder. Switched temp download to a single static name (QytCroRec_new.exe). On startup, sweeps any leftover QytCroRec_v*.exe / .partial / per-version backups from older versions' failed updates."
+  "version": "1.50",
+  "notes": "v1.50: CRITICAL FIX — disabled UPX compression in PyInstaller spec. UPX-packed onefile exes trigger Windows Defender 'packer detected' heuristic, which quarantined python311.dll during extraction, causing 'Failed to load Python DLL ... _MEI*\\python311.dll' at launch. Exe is ~30 MB larger but actually runs. Affected every build since UPX was enabled."
 }
