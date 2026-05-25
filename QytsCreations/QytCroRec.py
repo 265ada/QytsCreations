@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.59"
+__version__ = "1.60"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -513,7 +513,12 @@ def get_foreground_title() -> str:
     _u32.GetWindowTextW(hwnd, buf, n + 1)
     return buf.value
 
-def find_window_hwnd(title: str) -> Optional[int]:
+def find_window_hwnd(title: str,
+                     skip_hwnds: Optional[set] = None) -> Optional[int]:
+    """Return the first visible window whose title contains *title* (case-
+    insensitive).  Pass skip_hwnds to exclude already-claimed windows — used
+    when multiple lanes target windows with the same title so each lane gets
+    a distinct HWND (e.g. two game accounts with the identical window name)."""
     matches: list = []
     WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.c_long)
     def _cb(hwnd, _):
@@ -521,7 +526,8 @@ def find_window_hwnd(title: str) -> Optional[int]:
             buf = ctypes.create_unicode_buffer(256)
             _u32.GetWindowTextW(hwnd, buf, 256)
             if title.lower() in buf.value.lower() and buf.value:
-                matches.append(hwnd)
+                if skip_hwnds is None or hwnd not in skip_hwnds:
+                    matches.append(hwnd)
         return True
     _u32.EnumWindows(WNDENUMPROC(_cb), 0)
     return matches[0] if matches else None
@@ -1395,12 +1401,17 @@ def _detours_pipe_ready(pid: int) -> bool:
 _LAST_BACKEND_ERROR: str = ""
 
 
-def create_backend(macro: "Macro") -> Optional[InputBackend]:
+def create_backend(macro: "Macro",
+                   hwnd_override: Optional[int] = None) -> Optional[InputBackend]:
     """
     Resolve a Macro's input_backend setting to a concrete InputBackend.
     Returns None if no usable backend could be created.  The reason is
     stored in _LAST_BACKEND_ERROR so the UI can show something better than
     "Playback complete" when nothing actually played.
+
+    hwnd_override: pass a pre-resolved HWND to skip find_window_hwnd()
+    — used by ChainPlayerThread to assign distinct windows to each lane when
+    multiple lanes target windows with the same title (e.g. two game accounts).
     """
     global _LAST_BACKEND_ERROR
     _LAST_BACKEND_ERROR = ""
@@ -1408,6 +1419,8 @@ def create_backend(macro: "Macro") -> Optional[InputBackend]:
     choice = (macro.input_backend or "auto").lower()
 
     def _hwnd_for_macro() -> Optional[int]:
+        if hwnd_override:
+            return hwnd_override
         if not (macro.use_target_window and macro.target_window_title): return None
         return find_window_hwnd(macro.target_window_title)
 
@@ -1879,13 +1892,28 @@ class ChainPlayerThread(QThread):
 
             rep_label = f"rep {rep+1}/{reps if primary.repeat_count else '∞'}"
 
+            # ── Pre-resolve one unique HWND per lane ─────────────────────────
+            # find_window_hwnd does a substring match so two lanes with the
+            # same window title (e.g. two game accounts) would BOTH find the
+            # same first-matching HWND.  Resolve sequentially and skip already-
+            # claimed HWNDs so Primary gets match[0], Secondary gets match[1].
+            _claimed_hwnds: set = set()
+            _lane_hwnds: dict   = {}
+            for _li, _ln in active:
+                if _ln.use_target_window and _ln.target_window_title:
+                    _h = find_window_hwnd(_ln.target_window_title, _claimed_hwnds)
+                    if _h:
+                        _claimed_hwnds.add(_h)
+                        _lane_hwnds[_li] = _h
+
             # ── Fire ALL active lanes simultaneously ──────────────────────────
-            def _run_lane_worker(lane_idx, lane):
+            def _run_lane_worker(lane_idx, lane, hwnd_pre=None):
                 try:
                     self.lane_started.emit(g.id, lane_idx, lane.id)
                     self.log_sig.emit(
                         f"[{g.name}] Lane {lane_idx} '{lane.name}' starting ({rep_label})")
-                    ok = self._run_one_lane(lane_idx, lane, all_macros)
+                    ok = self._run_one_lane(lane_idx, lane, all_macros,
+                                           hwnd_override=hwnd_pre)
                     if ok:
                         self.log_sig.emit(
                             f"[{g.name}] Lane {lane_idx} '{lane.name}' complete.")
@@ -1903,7 +1931,9 @@ class ChainPlayerThread(QThread):
                     except Exception: pass
 
             threads = [
-                threading.Thread(target=_run_lane_worker, args=(li, ln), daemon=True)
+                threading.Thread(target=_run_lane_worker,
+                                 args=(li, ln, _lane_hwnds.get(li)),
+                                 daemon=True)
                 for li, ln in active
             ]
             for t in threads:
@@ -1915,9 +1945,14 @@ class ChainPlayerThread(QThread):
                 break
 
     def _run_one_lane(self, lane_idx: int, lane: "Macro",
-                      all_macros: list) -> bool:
-        """Run a single lane to completion. Returns True on normal finish."""
-        backend = create_backend(lane)
+                      all_macros: list,
+                      hwnd_override: Optional[int] = None) -> bool:
+        """Run a single lane to completion. Returns True on normal finish.
+
+        hwnd_override: pre-resolved HWND from _run_chain so parallel lanes
+        with the same window title each get their own distinct window.
+        """
+        backend = create_backend(lane, hwnd_override=hwnd_override)
         if backend is None:
             self.mode_sig.emit(self.group.id, lane_idx,
                                f"error:{_LAST_BACKEND_ERROR}")
@@ -1925,19 +1960,20 @@ class ChainPlayerThread(QThread):
 
         self.mode_sig.emit(self.group.id, lane_idx, backend.name)
 
-        # Log attach info
-        hwnd = None
+        # Log attach info — use the pre-resolved hwnd when available so the
+        # log faithfully reflects which window each lane actually targets.
+        hwnd = hwnd_override
         pid  = 0
         proc_name = ""
-        if lane.use_target_window and lane.target_window_title:
+        if hwnd is None and lane.use_target_window and lane.target_window_title:
             hwnd = find_window_hwnd(lane.target_window_title)
-            if hwnd:
-                pid = get_window_pid(hwnd)
-                try:
-                    import psutil
-                    proc_name = psutil.Process(pid).name()
-                except Exception:
-                    proc_name = ""
+        if hwnd:
+            pid = get_window_pid(hwnd)
+            try:
+                import psutil
+                proc_name = psutil.Process(pid).name()
+            except Exception:
+                proc_name = ""
         hook_status = ""
         if lane.input_backend == "detours" and pid:
             hook_status = "Hook: Loaded" if _pipe_exists(pid) else "Hook: Not loaded"
