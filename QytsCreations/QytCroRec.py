@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.61"
+__version__ = "1.62"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -3093,7 +3093,6 @@ class LaneWidget(QWidget):
         during fast playback don't trigger a selectRow+scrollTo per event."""
         if not self.isVisible():
             return
-        # Debounce: store pending idx, fire via single-shot timer
         self._hl_pending = idx
         if not getattr(self, "_hl_timer", None):
             self._hl_timer = QTimer(self)
@@ -3101,9 +3100,25 @@ class LaneWidget(QWidget):
             self._hl_timer.setInterval(80)
             def _do_hl():
                 i = getattr(self, "_hl_pending", -1)
-                if 0 <= i < self._table.rowCount():
-                    self._table.selectRow(i)
-                    self._table.scrollTo(self._table.model().index(i, 0))
+                if not (0 <= i < self._table.rowCount()):
+                    return
+                # If this row lives inside a collapsed group, expand the group
+                # first so the user can actually see which step is running.
+                for hr, g in list(self._groups.items()):
+                    if g["collapsed"] and hr < i <= hr + g["count"]:
+                        g["collapsed"] = False
+                        hdr = self._table.item(hr, 0)
+                        if hdr: hdr.setText(f"▼  ×{g['count']}")
+                        allowed = {et for et, cb in self._ev_filters.items()
+                                   if cb.isChecked()}
+                        for off in range(1, g["count"] + 1):
+                            r = hr + off
+                            if r < self._table.rowCount():
+                                vis = g["et"] in allowed
+                                self._table.setRowHidden(r, not vis)
+                        break
+                self._table.selectRow(i)
+                self._table.scrollTo(self._table.model().index(i, 0))
             self._hl_timer.timeout.connect(_do_hl)
         if not self._hl_timer.isActive():
             self._hl_timer.start()
@@ -3617,7 +3632,11 @@ class LaneWidget(QWidget):
                 start, count, et = gbs[i]
                 row = self._table.rowCount()
                 self._table.insertRow(row)
-                hdr = QTableWidgetItem(f"▶  ×{count}")
+                # Groups start EXPANDED so all events are always visible.
+                # User can click the ▼ header to collapse a run they don't
+                # need to see.  Previously groups were collapsed by default
+                # which caused events to appear "missing" after recording.
+                hdr = QTableWidgetItem(f"▼  ×{count}")
                 hdr.setForeground(QColor(EVENT_COLORS.get(et, "#cdd6f4")))
                 hdr.setBackground(QColor(30, 30, 50, 160))
                 hdr.setFlags(_ro())
@@ -3627,14 +3646,14 @@ class LaneWidget(QWidget):
                 self._table.setItem(row, 1, _plain(f"{round((t1-t0)*1000)}ms"))
                 self._table.setItem(row, 2, _type_item(et))
                 self._table.setItem(row, 3, _plain(
-                    f"({count} similar — click ▶ to expand)"))
+                    f"({count} similar — click ▼ to collapse)"))
                 ph = QTableWidgetItem("—"); ph.setFlags(_ro())
                 ph.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._table.setItem(row, 4, ph)
                 self._table.setItem(row, 5, _plain(""))
                 self._row_event_idx.append(-1)
                 self._groups[row] = {"start": start, "count": count,
-                                     "et": et, "collapsed": True}
+                                     "et": et, "collapsed": False}
                 for j in range(count):
                     ev = m.events[i+j]
                     r = self._table.rowCount(); self._table.insertRow(r)
@@ -3645,7 +3664,8 @@ class LaneWidget(QWidget):
                     self._table.setItem(r, 4, _guard_item(ev))
                     self._table.setItem(r, 5, _plain(""))
                     self._row_event_idx.append(i+j)
-                    self._table.setRowHidden(r, True)
+                    # Expanded by default — row is visible
+                    self._table.setRowHidden(r, False)
                 i += count
             else:
                 ev = m.events[i]

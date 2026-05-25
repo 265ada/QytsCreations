@@ -1,4 +1,4 @@
 {
-  "version": "1.61",
-  "notes": "v1.61: Lanes now run fully independently. Each lane has its own rep loop and does not wait for other lanes between reps. Primary's rep count still controls when the chain stops. Faster lanes cycle more; slower lanes finish their current rep when Primary ends."
+  "version": "1.62",
+  "notes": "v1.62: Events no longer disappear. Groups of same-type events now expand by default (collapsed=False) so all steps are always visible. Click group header to collapse if needed. Playback highlight auto-expands any collapsed group it lands in."
 }
