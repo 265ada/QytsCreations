@@ -1,0 +1,316 @@
+<Window x:Class="QytCroRec.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="QytCroRec" Height="720" Width="1100"
+        MinHeight="560" MinWidth="800"
+        Background="{StaticResource BaseBrush}"
+        WindowStartupLocation="CenterScreen">
+
+  <Window.Resources>
+    <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="{StaticResource BlueBrush}"/>
+      <Setter Property="Foreground" Value="{StaticResource CrustBrush}"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="{StaticResource RedBrush}"/>
+      <Setter Property="Foreground" Value="{StaticResource CrustBrush}"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style x:Key="GreenButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="{StaticResource GreenBrush}"/>
+      <Setter Property="Foreground" Value="{StaticResource CrustBrush}"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+  </Window.Resources>
+
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <!-- TOP BAR -->
+    <Border Grid.Row="0" Background="{StaticResource CrustBrush}"
+            BorderBrush="{StaticResource Surface0Brush}" BorderThickness="0,0,0,1"
+            Padding="12,8">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+
+        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock Text="⬡ QytCroRec" FontSize="16" FontWeight="Bold"
+                     Foreground="{StaticResource BlueBrush}" VerticalAlignment="Center"/>
+          <TextBlock x:Name="VersionLabel" Text="v1.0.0" FontSize="11"
+                     Foreground="{StaticResource Subtext0Brush}"
+                     Margin="8,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <StackPanel Grid.Column="1" Orientation="Horizontal"
+                    HorizontalAlignment="Center" VerticalAlignment="Center">
+          <Button x:Name="BtnRecord" Content="⏺  Record" Width="110" Margin="4,0"
+                  Click="BtnRecord_Click"/>
+          <Button x:Name="BtnPlay" Content="▶  Play" Width="100" Margin="4,0"
+                  Style="{StaticResource GreenButton}"
+                  Click="BtnPlay_Click"/>
+          <Button x:Name="BtnStop" Content="■  Stop All" Width="110" Margin="4,0"
+                  Style="{StaticResource DangerButton}"
+                  Click="BtnStop_Click"/>
+        </StackPanel>
+
+        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button Content="＋ Group" Width="90" Margin="4,0" Click="BtnAddGroup_Click"/>
+          <Button Content="⚙ Settings" Width="90" Margin="4,0" Click="BtnSettings_Click"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- MAIN CONTENT -->
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="220" MinWidth="160" MaxWidth="320"/>
+        <ColumnDefinition Width="4"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+
+      <!-- Left: group list -->
+      <Grid Grid.Column="0" Background="{StaticResource MantleBrush}">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="{StaticResource Surface0Brush}" Padding="10,6">
+          <TextBlock Text="MACRO GROUPS" FontSize="10" FontWeight="SemiBold"
+                     Foreground="{StaticResource Subtext0Brush}"/>
+        </Border>
+
+        <ListBox x:Name="GroupList" Grid.Row="1" BorderThickness="0"
+                 SelectionChanged="GroupList_SelectionChanged"
+                 MouseDoubleClick="GroupList_MouseDoubleClick">
+          <ListBox.ItemTemplate>
+            <DataTemplate>
+              <StackPanel Orientation="Horizontal" Margin="0,2">
+                <TextBlock Text="{Binding Name}" FontSize="13" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding StatusTag}" Foreground="{StaticResource GreenBrush}"
+                           FontSize="10" VerticalAlignment="Center" Margin="6,0,0,0"/>
+              </StackPanel>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+          <ListBox.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="Rename" Click="GroupCtx_Rename"/>
+              <MenuItem Header="Duplicate" Click="GroupCtx_Duplicate"/>
+              <Separator/>
+              <MenuItem Header="Delete" Click="GroupCtx_Delete"/>
+            </ContextMenu>
+          </ListBox.ContextMenu>
+        </ListBox>
+
+        <Border Grid.Row="2" Background="{StaticResource CrustBrush}"
+                BorderBrush="{StaticResource Surface0Brush}" BorderThickness="0,1,0,0"
+                Padding="10,6">
+          <StackPanel>
+            <TextBlock x:Name="RunsLabel" Text="Runs: 0" FontSize="11"
+                       Foreground="{StaticResource Subtext0Brush}"
+                       Cursor="Hand" MouseRightButtonUp="RunsLabel_RightClick"/>
+            <TextBlock x:Name="ExecLabel" Text="Executions: 0" FontSize="11"
+                       Foreground="{StaticResource Subtext0Brush}"
+                       Cursor="Hand" MouseRightButtonUp="ExecLabel_RightClick"/>
+          </StackPanel>
+        </Border>
+      </Grid>
+
+      <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
+                    Background="{StaticResource Surface0Brush}"/>
+
+      <!-- Right: lane editor -->
+      <Grid Grid.Column="2">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="160" MinHeight="80"/>
+        </Grid.RowDefinitions>
+
+        <!-- Group header -->
+        <Border Grid.Row="0" Background="{StaticResource Surface0Brush}"
+                Padding="14,8" BorderBrush="{StaticResource Surface1Brush}" BorderThickness="0,0,0,1">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+              <TextBlock x:Name="GroupNameLabel" Text="No group selected"
+                         FontSize="15" FontWeight="SemiBold"
+                         Foreground="{StaticResource TextBrush}"/>
+              <CheckBox x:Name="ChkGroupEnabled" Content="Enabled" Margin="18,0,0,0"
+                        VerticalAlignment="Center"
+                        Checked="ChkGroupEnabled_Changed" Unchecked="ChkGroupEnabled_Changed"/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+              <TextBlock Text="Repeat:" VerticalAlignment="Center" Margin="0,0,6,0"
+                         Foreground="{StaticResource Subtext0Brush}"/>
+              <TextBox x:Name="TxtRepeat" Width="60" Text="1" VerticalAlignment="Center"
+                       TextChanged="TxtRepeat_Changed"/>
+              <TextBlock Text="Speed×:" VerticalAlignment="Center" Margin="12,0,6,0"
+                         Foreground="{StaticResource Subtext0Brush}"/>
+              <TextBox x:Name="TxtSpeed" Width="60" Text="1.0" VerticalAlignment="Center"
+                       TextChanged="TxtSpeed_Changed"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <!-- Lane tabs -->
+        <TabControl x:Name="LaneTabs" Grid.Row="1" SelectionChanged="LaneTabs_SelectionChanged">
+
+          <!-- PRIMARY -->
+          <TabItem Header="Primary">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+              </Grid.RowDefinitions>
+              <Border Grid.Row="0" Background="{StaticResource Surface0Brush}" Padding="10,6">
+                <WrapPanel>
+                  <CheckBox x:Name="ChkPrimaryWindow" Content="Target window" Margin="0,0,12,0"
+                            Checked="ChkPrimaryWindow_Changed" Unchecked="ChkPrimaryWindow_Changed"/>
+                  <TextBox x:Name="TxtPrimaryWindow" Width="180" Margin="0,0,8,0"
+                           TextChanged="TxtPrimaryWindow_Changed"/>
+                  <Button Content="Pick" Width="50" Margin="0,0,8,0" Click="BtnPrimaryPick_Click"/>
+                  <TextBlock x:Name="LblPrimaryPid" Foreground="{StaticResource Subtext0Brush}"
+                             VerticalAlignment="Center" FontFamily="Consolas" FontSize="11"/>
+                </WrapPanel>
+              </Border>
+              <DataGrid x:Name="GridPrimary" Grid.Row="1"
+                        SelectionChanged="EventGrid_SelectionChanged" KeyDown="EventGrid_KeyDown">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Time (s)" Binding="{Binding Timestamp, StringFormat=F4}" Width="90"/>
+                  <DataGridTextColumn Header="Type"     Binding="{Binding EventType}" Width="110"/>
+                  <DataGridTextColumn Header="Data"     Binding="{Binding DataSummary}" Width="*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </Grid>
+          </TabItem>
+
+          <!-- SECONDARY -->
+          <TabItem Header="Secondary">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+              </Grid.RowDefinitions>
+              <Border Grid.Row="0" Background="{StaticResource Surface0Brush}" Padding="10,6">
+                <WrapPanel>
+                  <CheckBox x:Name="ChkSecEnabled" Content="Enabled" Margin="0,0,12,0"
+                            Checked="ChkSecEnabled_Changed" Unchecked="ChkSecEnabled_Changed"/>
+                  <CheckBox x:Name="ChkSecWindow" Content="Target window" Margin="0,0,12,0"
+                            Checked="ChkSecWindow_Changed" Unchecked="ChkSecWindow_Changed"/>
+                  <TextBox x:Name="TxtSecWindow" Width="180" Margin="0,0,8,0"
+                           TextChanged="TxtSecWindow_Changed"/>
+                  <Button Content="Pick" Width="50" Margin="0,0,8,0" Click="BtnSecPick_Click"/>
+                  <TextBlock x:Name="LblSecPid" Foreground="{StaticResource Subtext0Brush}"
+                             VerticalAlignment="Center" FontFamily="Consolas" FontSize="11"/>
+                </WrapPanel>
+              </Border>
+              <DataGrid x:Name="GridSecondary" Grid.Row="1"
+                        SelectionChanged="EventGrid_SelectionChanged" KeyDown="EventGrid_KeyDown">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Time (s)" Binding="{Binding Timestamp, StringFormat=F4}" Width="90"/>
+                  <DataGridTextColumn Header="Type"     Binding="{Binding EventType}" Width="110"/>
+                  <DataGridTextColumn Header="Data"     Binding="{Binding DataSummary}" Width="*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </Grid>
+          </TabItem>
+
+          <!-- THIRD -->
+          <TabItem Header="Third">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+              </Grid.RowDefinitions>
+              <Border Grid.Row="0" Background="{StaticResource Surface0Brush}" Padding="10,6">
+                <WrapPanel>
+                  <CheckBox x:Name="ChkThirdEnabled" Content="Enabled" Margin="0,0,12,0"
+                            Checked="ChkThirdEnabled_Changed" Unchecked="ChkThirdEnabled_Changed"/>
+                  <CheckBox x:Name="ChkThirdWindow" Content="Target window" Margin="0,0,12,0"
+                            Checked="ChkThirdWindow_Changed" Unchecked="ChkThirdWindow_Changed"/>
+                  <TextBox x:Name="TxtThirdWindow" Width="180" Margin="0,0,8,0"
+                           TextChanged="TxtThirdWindow_Changed"/>
+                  <Button Content="Pick" Width="50" Margin="0,0,8,0" Click="BtnThirdPick_Click"/>
+                  <TextBlock x:Name="LblThirdPid" Foreground="{StaticResource Subtext0Brush}"
+                             VerticalAlignment="Center" FontFamily="Consolas" FontSize="11"/>
+                </WrapPanel>
+              </Border>
+              <DataGrid x:Name="GridThird" Grid.Row="1"
+                        SelectionChanged="EventGrid_SelectionChanged" KeyDown="EventGrid_KeyDown">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Time (s)" Binding="{Binding Timestamp, StringFormat=F4}" Width="90"/>
+                  <DataGridTextColumn Header="Type"     Binding="{Binding EventType}" Width="110"/>
+                  <DataGridTextColumn Header="Data"     Binding="{Binding DataSummary}" Width="*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </Grid>
+          </TabItem>
+        </TabControl>
+
+        <!-- Activity log -->
+        <Grid Grid.Row="2">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+          <Border Grid.Row="0" Background="{StaticResource CrustBrush}"
+                  BorderBrush="{StaticResource Surface0Brush}" BorderThickness="0,1,0,0" Padding="10,4">
+            <Grid>
+              <TextBlock Text="ACTIVITY LOG" FontSize="10" FontWeight="SemiBold"
+                         Foreground="{StaticResource Subtext0Brush}" VerticalAlignment="Center"/>
+              <Button Content="Clear" HorizontalAlignment="Right" Padding="8,2"
+                      Click="BtnClearLog_Click"/>
+            </Grid>
+          </Border>
+          <ListBox x:Name="ActivityLog" Grid.Row="1"
+                   Background="{StaticResource CrustBrush}" BorderThickness="0"
+                   FontFamily="Consolas" FontSize="11"
+                   ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                   VirtualizingPanel.IsVirtualizing="True"/>
+        </Grid>
+      </Grid>
+    </Grid>
+
+    <!-- STATUS BAR -->
+    <Border Grid.Row="2" Background="{StaticResource CrustBrush}"
+            BorderBrush="{StaticResource Surface0Brush}" BorderThickness="0,1,0,0" Padding="12,4">
+      <Grid>
+        <TextBlock x:Name="StatusLabel" Text="Ready"
+                   Foreground="{StaticResource Subtext0Brush}" FontSize="11" VerticalAlignment="Center"/>
+        <TextBlock x:Name="HotkeyHint" HorizontalAlignment="Right"
+                   Text="Record: Ctrl+R  |  Stop: End"
+                   Foreground="{StaticResource Overlay0Brush}"
+                   FontSize="10" VerticalAlignment="Center"/>
+      </Grid>
+    </Border>
+
+    <!-- Toast overlay -->
+    <Border x:Name="ToastBorder" Grid.Row="1"
+            HorizontalAlignment="Center" VerticalAlignment="Center"
+            Background="{StaticResource BaseBrush}"
+            BorderBrush="{StaticResource BlueBrush}" BorderThickness="2"
+            CornerRadius="12" Padding="24,16"
+            Visibility="Collapsed" Panel.ZIndex="100">
+      <TextBlock x:Name="ToastText" FontSize="14" FontWeight="SemiBold"
+                 Foreground="{StaticResource TextBrush}"
+                 TextAlignment="Center" TextWrapping="Wrap"/>
+    </Border>
+  </Grid>
+</Window>
