@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.44"
+__version__ = "1.45"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -4487,6 +4487,15 @@ class MainWindow(QMainWindow):
             "QPushButton:hover{background:#45475a;color:#f5a3bb;}")
         btn_crash.clicked.connect(self._copy_crash_log)
         row.addWidget(btn_crash)
+        # Feedback button — opens dialog that POSTs to a pre-filled GitHub issue
+        btn_fb = QPushButton("💬 Feedback")
+        btn_fb.setToolTip("Send feedback — opens a pre-filled GitHub issue in your browser")
+        btn_fb.setStyleSheet(
+            "QPushButton{background:#313244;color:#a6e3a1;border:1px solid #45475a;"
+            "border-radius:5px;padding:4px 10px;font-size:12px;}"
+            "QPushButton:hover{background:#45475a;color:#caf0c2;}")
+        btn_fb.clicked.connect(self._open_feedback_dialog)
+        row.addWidget(btn_fb)
         row.addSpacing(12)
         btn_tray = QPushButton("⊟ Tray")
         btn_tray.setToolTip("Minimize to system tray")
@@ -5593,6 +5602,159 @@ class MainWindow(QMainWindow):
             _crash_fp.flush()
         except Exception: pass
         self._copy_log_file(_CRASH_LOG_PATH, "Crash log")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SECTION: Feedback submission (opens pre-filled GitHub issue in browser)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _open_feedback_dialog(self):
+        """Compose feedback, then open a pre-filled GitHub issue in the browser.
+        Falls back to saving feedback.txt locally if browser-open fails."""
+        from PyQt6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+            QTextEdit, QComboBox, QCheckBox, QPushButton, QDialogButtonBox,
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Send Feedback")
+        dlg.setMinimumSize(520, 460)
+        v = QVBoxLayout(dlg)
+
+        v.addWidget(QLabel(
+            "<b>Send feedback</b> — opens a pre-filled GitHub issue in your browser.<br>"
+            "<span style='color:#7a7d99;font-size:11px;'>"
+            "You'll review it before posting.  GitHub account required to submit."
+            "</span>"))
+
+        # Category
+        cat_row = QHBoxLayout()
+        cat_row.addWidget(QLabel("Type:"))
+        cat = QComboBox()
+        cat.addItems(["🐛 Bug report", "💡 Feature request", "❓ Question", "💬 General"])
+        cat_row.addWidget(cat, 1)
+        v.addLayout(cat_row)
+
+        # Subject
+        v.addWidget(QLabel("Subject:"))
+        subj = QLineEdit()
+        subj.setPlaceholderText("One-line summary…")
+        v.addWidget(subj)
+
+        # Body
+        v.addWidget(QLabel("Details:"))
+        body = QTextEdit()
+        body.setPlaceholderText(
+            "Steps to reproduce, expected vs actual, screenshots welcome (paste "
+            "into the GitHub issue once it opens)…")
+        body.setStyleSheet("background:#181825;color:#cdd6f4;font-family:Consolas,monospace;")
+        v.addWidget(body, 1)
+
+        # Include logs?
+        chk_diag  = QCheckBox("Attach diagnostic log (recommended for bugs)")
+        chk_diag.setChecked(True)
+        chk_crash = QCheckBox("Attach crash log")
+        v.addWidget(chk_diag); v.addWidget(chk_crash)
+
+        # Buttons
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel)
+        send_btn = bb.addButton("Open in GitHub", QDialogButtonBox.ButtonRole.AcceptRole)
+        send_btn.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #58d68d,stop:1 #28a360);color:#ffffff;border:2px solid #80e3a5;"
+            "border-radius:6px;padding:6px 14px;font-weight:bold;}"
+            "QPushButton:hover{background:#3ec07a;}")
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # ── Build the issue ──────────────────────────────────────────────────
+        title = subj.text().strip() or "(no subject)"
+        type_label = cat.currentText()
+        type_tag = {"🐛 Bug report":"bug","💡 Feature request":"enhancement",
+                    "❓ Question":"question","💬 General":"feedback"}.get(type_label, "feedback")
+        title_with_tag = f"[{type_tag}] {title}"
+
+        parts = []
+        parts.append(f"**Type:** {type_label}")
+        parts.append(f"**Version:** v{__version__}")
+        parts.append(f"**OS:** {sys.platform}  ({os.name})")
+        parts.append("")
+        parts.append("### Details")
+        parts.append(body.toPlainText().strip() or "_(no details provided)_")
+
+        def _tail(path: Path, n: int = 80) -> str:
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                return "\n".join(lines[-n:])
+            except Exception:
+                return "(unable to read)"
+
+        if chk_diag.isChecked():
+            diag_path = Path.home() / ".macro_recorder" / "dll_hook.log"
+            if diag_path.exists():
+                parts.append("")
+                parts.append("<details><summary>Diagnostic log (last 80 lines)</summary>\n")
+                parts.append("```")
+                parts.append(_tail(diag_path))
+                parts.append("```")
+                parts.append("</details>")
+        if chk_crash.isChecked() and _CRASH_LOG_PATH.exists():
+            parts.append("")
+            parts.append("<details><summary>Crash log (last 80 lines)</summary>\n")
+            parts.append("```")
+            parts.append(_tail(_CRASH_LOG_PATH))
+            parts.append("```")
+            parts.append("</details>")
+
+        issue_body = "\n".join(parts)
+
+        # ── Open GitHub new-issue URL pre-filled ─────────────────────────────
+        from urllib.parse import quote
+        url = (
+            "https://github.com/265ada/QytsCreations/issues/new"
+            f"?title={quote(title_with_tag)}"
+            f"&body={quote(issue_body)}"
+            f"&labels={quote(type_tag)}"
+        )
+        # GitHub caps URL ~8 KB.  If too long, save body to disk + tell user.
+        if len(url) > 7800:
+            fb_dump = Path.home() / ".macro_recorder" / "feedback_pending.md"
+            try:
+                fb_dump.write_text(issue_body, encoding="utf-8")
+            except Exception: pass
+            short_body = (
+                "Body too large for URL — opened the issue tracker.\n\n"
+                "Your full report (with logs) was saved to:\n"
+                f"`{fb_dump}`\n\nPaste it into the issue body manually.")
+            url = (
+                "https://github.com/265ada/QytsCreations/issues/new"
+                f"?title={quote(title_with_tag)}"
+                f"&body={quote(short_body)}"
+                f"&labels={quote(type_tag)}"
+            )
+
+        opened = False
+        try:
+            import webbrowser
+            opened = webbrowser.open(url)
+        except Exception as e:
+            print(f"[feedback] browser open failed: {e}")
+        if opened:
+            self._set_status("Feedback opened in browser — submit it on GitHub.", "#a6e3a1")
+        else:
+            # Fallback: save to disk + tell user
+            fb_dump = Path.home() / ".macro_recorder" / "feedback_pending.md"
+            try:
+                fb_dump.write_text(f"# {title_with_tag}\n\n{issue_body}",
+                                   encoding="utf-8")
+                QMessageBox.information(self, "Feedback Saved",
+                    f"Couldn't open browser.  Saved your report to:\n\n{fb_dump}\n\n"
+                    f"Submit it manually at:\nhttps://github.com/265ada/QytsCreations/issues/new")
+            except Exception as e:
+                QMessageBox.warning(self, "Feedback Failed",
+                    f"Couldn't open browser or save file: {e}")
 
     # ══════════════════════════════════════════════════════════════════════════
     # SECTION: Per-lane Recording

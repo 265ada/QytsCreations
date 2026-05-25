@@ -1,4 +1,4 @@
 {
-  "version": "1.44",
-  "notes": "v1.44: New 'Check Now' link next to the Auto-Update checkbox triggers an immediate update check. App also polls GitHub quietly every 30 minutes in the background — unobtrusive, only prompts when a real new version exists."
+  "version": "1.45",
+  "notes": "v1.45: New 💬 Feedback button in topbar (next to Crash Log). Opens a dialog with type / subject / body fields plus checkboxes to attach diagnostic and crash logs. On submit, opens a pre-filled GitHub issue in your browser — no API token needed, no creds stored. Falls back to saving feedback_pending.md if browser open fails."
 }
