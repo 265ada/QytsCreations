@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.39"
+__version__ = "1.40"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -4509,18 +4509,20 @@ class MainWindow(QMainWindow):
         btn_gm_rec.setToolTip("Record Guard Macro — capture events into the selected guard macro")
         btn_gm_rec.setStyleSheet(
             "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "stop:0 #ff8aa0,stop:1 #d63060);color:#ffffff;border:2px solid #ffb0c0;"
+            "stop:0 #ffe066,stop:1 #d4a300);color:#2a1d00;border:2px solid #ffee99;"
             "border-radius:6px;font-size:16px;font-weight:bold;padding:2px;}"
-            "QPushButton:hover{background:#ee5078;border-color:#ffc8d8;}"
-            "QPushButton:pressed{background:#9a1f44;}")
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #fff099,stop:1 #e0b820);border-color:#fff5b0;}"
+            "QPushButton:pressed{background:#a07800;color:#ffffff;}")
         btn_gm_stop = QPushButton("⏹")
         btn_gm_stop.setToolTip("Stop Recording — end the current guard macro capture")
         btn_gm_stop.setStyleSheet(
             "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "stop:0 #4ab8ff,stop:1 #1c70c0);color:#ffffff;border:2px solid #80d0ff;"
+            "stop:0 #ffae5c,stop:1 #e07016);color:#ffffff;border:2px solid #ffc88a;"
             "border-radius:6px;font-size:16px;font-weight:bold;padding:2px;}"
-            "QPushButton:hover{background:#2a90e0;border-color:#a0e0ff;}"
-            "QPushButton:pressed{background:#0c4880;}")
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #ffc080,stop:1 #f08828);border-color:#ffd9a8;}"
+            "QPushButton:pressed{background:#a04a00;}")
         btn_gm_new .clicked.connect(self._guard_macro_new)
         btn_gm_del .clicked.connect(self._guard_macro_delete)
         btn_gm_rec .clicked.connect(self._guard_macro_record)

@@ -1,4 +1,4 @@
 {
-  "version": "1.39",
-  "notes": "v1.39: Guard Macro buttons redesigned as vivid icon-only chips — green ➕ New, red 🗑 Delete, pink ⏺ Record, blue ⏹ Stop. Each has a descriptive tooltip on hover. Larger 30px height, full-width split, pointing-hand cursor."
+  "version": "1.40",
+  "notes": "v1.40: Guard Macro Record button now yellow gradient with dark text, Stop button now orange gradient with white text. Polished hover states match base gradient. Green New + red Delete unchanged."
 }
