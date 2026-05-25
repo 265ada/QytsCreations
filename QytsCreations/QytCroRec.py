@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.52"
+__version__ = "1.53"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -281,8 +281,22 @@ class Storage:
     # ── Guard Macros (standalone, used by any lane's pixel guard correction) ─
 
     def save_guard_macros(self, macros: list):
-        self.guard_macros_path.write_text(
-            json.dumps([asdict(m) for m in macros], indent=2), encoding="utf-8")
+        """Atomic write (same pattern as save_groups) so guard macro events
+        survive crashes / kills / power loss mid-write."""
+        payload = json.dumps([asdict(m) for m in macros], indent=2)
+        tmp = self.guard_macros_path.with_suffix(".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                try: os.fsync(f.fileno())
+                except Exception: pass
+            os.replace(tmp, self.guard_macros_path)
+        except Exception as e:
+            print(f"[save_guard_macros] FAILED: {e}")
+            try: tmp.unlink()
+            except Exception: pass
+            raise
 
     def load_guard_macros(self) -> list:
         if not self.guard_macros_path.exists():
@@ -299,7 +313,10 @@ class Storage:
     # ── Groups (new primary format) ───────────────────────────────────────────
 
     def save_groups(self, groups: list):
-        """Serialise list[MacroGroup] → groups.json."""
+        """Atomically serialise list[MacroGroup] → groups.json.
+        Writes to .tmp first, fsyncs, then os.replace — partial writes cannot
+        corrupt the existing file even if the app is killed mid-write.
+        Also keeps .bak.json snapshot from the previous successful write."""
         def _ser_group(g: MacroGroup) -> dict:
             return {
                 "id":    g.id,
@@ -308,11 +325,28 @@ class Storage:
                 "shared_guard_users": getattr(g, "shared_guard_users", 0b111),
                 "lanes": [asdict(lane) for lane in g.lanes],
             }
+        payload = json.dumps([_ser_group(g) for g in groups], indent=2)
+        tmp = self.groups_path.with_suffix(".tmp")
         bak = self.groups_path.with_suffix(".bak.json")
+        # Snapshot previous good copy before clobbering
         if self.groups_path.exists():
-            import shutil; shutil.copy2(self.groups_path, bak)
-        self.groups_path.write_text(
-            json.dumps([_ser_group(g) for g in groups], indent=2), encoding="utf-8")
+            try:
+                import shutil; shutil.copy2(self.groups_path, bak)
+            except Exception as e:
+                print(f"[save_groups] backup copy failed (continuing): {e}")
+        # Write to .tmp, fsync, atomically replace
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                try: os.fsync(f.fileno())
+                except Exception: pass
+            os.replace(tmp, self.groups_path)
+        except Exception as e:
+            print(f"[save_groups] atomic write FAILED: {e}")
+            try: tmp.unlink()
+            except Exception: pass
+            raise
 
     def load_groups(self) -> list:
         """Load groups.json; if absent, migrate old macros.json (each macro → 1-lane group)."""
@@ -4306,6 +4340,20 @@ class MainWindow(QMainWindow):
         self._update_poll_timer.start()
         self._update_dlg = None      # QProgressDialog (created on demand)
         self._updating   = False     # True after user confirms — bypass closeEvent prompt
+        # ── Belt-and-braces 5-second autosave safety net ─────────────────────
+        # Per-event saves cover recording.  This catches every OTHER edit
+        # (rename, repeat change, window pick, lane reorder, guard tweak…)
+        # so the user NEVER loses anything more than 5 seconds of work.
+        self._safety_save_timer = QTimer(self)
+        self._safety_save_timer.setInterval(5000)
+        def _safety_save():
+            try:
+                self._storage.save_groups(self._groups)
+                self._storage.save_guard_macros(self._guard_macros)
+            except Exception as e:
+                print(f"[safety-save] {e}")
+        self._safety_save_timer.timeout.connect(_safety_save)
+        self._safety_save_timer.start()
 
         self._build_ui()
         self._apply_shortcuts()
@@ -6085,15 +6133,14 @@ class MainWindow(QMainWindow):
             record_mouse_move=m.record_mouse_move,
             filter_keys=self._build_shortcut_filter(),
             target_hwnd=target_hwnd)
-        # Save groups on every Nth event so unexpected app close / power loss
-        # doesn't wipe in-progress recording.
-        self._rec_save_ctr = 0
+        # Save groups on EVERY captured event so unexpected app close / power
+        # loss / kill / AV / update cannot wipe in-progress recording.  Atomic
+        # write inside save_groups means partial writes can't corrupt the file
+        # either — the user has lost too many recording sessions.
         def _capture(ev, lw_=lw):
             lw_.add_event(ev)
-            self._rec_save_ctr += 1
-            if self._rec_save_ctr % 25 == 0:
-                try: self._storage.save_groups(self._groups)
-                except Exception as e: print(f"[autosave-rec] {e}")
+            try: self._storage.save_groups(self._groups)
+            except Exception as e: print(f"[autosave-rec] {e}")
         rec.captured.connect(_capture)
         rec.done.connect(lambda mid=macro_id: self._on_rec_done(mid))
         self._recorders[macro_id] = rec
@@ -6114,6 +6161,16 @@ class MainWindow(QMainWindow):
         lw = self._find_lane_widget(macro_id)
         if lw:
             lw.set_recording(False)
+            # ── Rebase timestamps so first event = t=0 ─────────────────────
+            # Stops the recorded reaction-time delay (user took 2 s to press
+            # the first key after clicking Record → every playback waited 2 s)
+            # from making parallel lanes APPEAR to sync.  Each lane now starts
+            # firing instantly on play.
+            if lw.macro.events:
+                first_ts = lw.macro.events[0].get("timestamp", 0.0)
+                if first_ts > 0:
+                    for ev in lw.macro.events:
+                        ev["timestamp"] = max(0.0, ev.get("timestamp", 0.0) - first_ts)
             lw._fill_table()
             n = len(lw.macro.events)
             self._set_status(f"Rec done — {n} events in '{lw.macro.name}'", "#a6adc8")
