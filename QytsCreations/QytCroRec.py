@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.48"
+__version__ = "1.49"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2124,11 +2124,13 @@ class AutoUpdater:
             if not self.exe_url:
                 return _fail("No EXE update URL configured.")
             current_exe = Path(sys.executable)
-            # Name the temp download after the new version, not "_update"
-            ver_tag      = new_version.strip() or "new"
-            new_exe      = current_exe.with_name(f"QytCroRec_v{ver_tag}.exe")
-            partial_exe  = current_exe.with_name(f"QytCroRec_v{ver_tag}.exe.partial")
-            backup_exe   = current_exe.with_name(f"QytCroRec_backup_v{self.current}.exe")
+            # Use a SINGLE static temp name — older versions used
+            # QytCroRec_v{ver}.exe but every failed update left an orphan
+            # exe behind, cluttering the install folder.  Static name means
+            # the next download overwrites the previous attempt's leftover.
+            new_exe      = current_exe.with_name("QytCroRec_new.exe")
+            partial_exe  = current_exe.with_name("QytCroRec_new.exe.partial")
+            backup_exe   = current_exe.with_name("QytCroRec_backup.exe")
             batch_path   = current_exe.with_name("_qyt_update.bat")
             log_path     = current_exe.with_name("_qyt_update.log")
             # ── Stream download to .partial file, verify, then rename ────────
@@ -4152,6 +4154,10 @@ class MainWindow(QMainWindow):
         threading.Thread(target=self._check_for_updates, daemon=True).start()
         # Initial render of run-counts strip (shows totals carried over from disk)
         self._refresh_runs_label()
+        # One-time cleanup: remove orphan QytCroRec_v*.exe / *.partial / backup
+        # files left over from pre-v1.49 failed update attempts (each retry
+        # used to create a uniquely-versioned temp file that never got swept).
+        self._cleanup_update_orphans()
 
     def _autosave_fn(self):
         self._storage.save_groups(self._groups)
@@ -4259,6 +4265,29 @@ class MainWindow(QMainWindow):
                 "Latest releases will NOT be downloaded automatically.\n"
                 "Only uncheck this if you are satisfied with the current version\n"
                 "or prefer to update manually from GitHub Releases.")
+
+    def _cleanup_update_orphans(self):
+        """Delete leftover QytCroRec_v*.exe / .partial / old backup files from
+        failed updates on older versions.  Silent — best-effort, no UI."""
+        if not getattr(sys, "frozen", False):
+            return
+        import re
+        install_dir = Path(sys.executable).parent
+        # Patterns: versioned exes, partial downloads, old per-version backups
+        patterns = [
+            re.compile(r"^QytCroRec_v[\d.]+\.exe$",       re.I),
+            re.compile(r"^QytCroRec_v[\d.]+\.exe\.partial$", re.I),
+            re.compile(r"^QytCroRec_backup_v[\d.]+\.exe$", re.I),
+            re.compile(r"^QytCroRec_new\.exe\.partial$",  re.I),
+        ]
+        for f in install_dir.iterdir():
+            if not f.is_file(): continue
+            if any(p.match(f.name) for p in patterns):
+                try:
+                    f.unlink()
+                    print(f"[cleanup] removed orphan: {f.name}")
+                except Exception as e:
+                    print(f"[cleanup] cannot remove {f.name}: {e}")
 
     def _check_for_updates(self, manual: bool = False):
         """Runs in a daemon thread — uses signal to marshal result to GUI thread.

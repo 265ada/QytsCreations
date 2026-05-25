@@ -1,4 +1,4 @@
 {
-  "version": "1.48",
-  "notes": "v1.48: Auto-update FIXED — batch script had em-dashes that crashed pathlib.write_text(encoding='ascii') with UnicodeEncodeError. Replaced with plain hyphens. Added errors='replace' safety net so any future Unicode slip can't kill the update again."
+  "version": "1.49",
+  "notes": "v1.49: Updater no longer leaves versioned orphan exes in your install folder. Switched temp download to a single static name (QytCroRec_new.exe). On startup, sweeps any leftover QytCroRec_v*.exe / .partial / per-version backups from older versions' failed updates."
 }
