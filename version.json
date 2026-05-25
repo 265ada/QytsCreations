@@ -1,4 +1,4 @@
 {
-  "version": "1.33",
-  "notes": "v1.33: Lane PID bleed FIXED — chain stop no longer destroys + recreates LaneWidgets. Events autosave every 25 captures (no loss on crash). Worker threads wrapped in try/except (chain repeats reliably). Per-PID inject lock prevents parallel injector races. Group-level shared Pixel Guard config selectable by Primary/Secondary/Third. Lane 2→Secondary, Lane 3→Third labels."
+  "version": "1.34",
+  "notes": "v1.34: Auto-updater FIXED — bypasses close prompt during update, force-quits with os._exit so batch can replace exe. New QProgressDialog shows MB / total / percent. Streaming 64 KB chunks for snappy progress. Batch retries move up to 60 times (handles slow Qt teardown). Logs failure to _qyt_update.log if move never succeeds."
 }

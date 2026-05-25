@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.33"
+__version__ = "1.34"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2082,11 +2082,14 @@ class AutoUpdater:
 
     def download_and_install(self, target_path: Path,
                              timeout: float = 60.0,
-                             new_version: str = "") -> bool:
+                             new_version: str = "",
+                             progress_cb=None) -> bool:
         """Download update and swap in.  Returns True on success.
         Exe mode: downloads new exe, writes a batch swap script that
         overwrites the current exe and relaunches it.
         Script mode: classic .new.py swap.
+        progress_cb(received_bytes, total_bytes) — optional, called as chunks
+        arrive.  total_bytes may be 0 if server didn't send Content-Length.
         """
         if getattr(sys, "frozen", False):
             # ── EXE MODE ─────────────────────────────────────────────────────
@@ -2098,9 +2101,24 @@ class AutoUpdater:
             ver_tag  = new_version.strip() or "new"
             new_exe  = current_exe.with_name(f"QytCroRec_v{ver_tag}.exe")
             batch_path = current_exe.with_name("_qyt_update.bat")
+            # ── Stream download with progress callback ────────────────────────
             try:
-                with urllib.request.urlopen(self.exe_url, timeout=timeout) as r:
-                    data = r.read()
+                req = urllib.request.Request(
+                    self.exe_url,
+                    headers={"User-Agent": "QytCroRec-Updater"})
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    total = int(r.headers.get("Content-Length") or 0)
+                    chunks = []
+                    received = 0
+                    while True:
+                        chunk = r.read(64 * 1024)   # 64 KB chunks — snappy
+                        if not chunk: break
+                        chunks.append(chunk)
+                        received += len(chunk)
+                        if progress_cb:
+                            try: progress_cb(received, total)
+                            except Exception: pass
+                    data = b"".join(chunks)
             except Exception as e:
                 print(f"Exe update download failed: {e}")
                 return False
@@ -2108,14 +2126,29 @@ class AutoUpdater:
                 print(f"Exe update sanity check failed (size={len(data)}).")
                 return False
             new_exe.write_bytes(data)
-            # Batch: wait for process exit, overwrite exe, relaunch, self-delete
-            # Use CALL + full-quoted path so spaces in directory work correctly.
+            # ── Robust batch: poll-retry until current exe is releasable ─────
+            # Old version used a fixed 2 s wait — failed on slow machines because
+            # Qt teardown sometimes takes longer; `move` then errored with the
+            # exe still in use, leaving the user on the old version.  Now we
+            # loop `move` up to 60 s, then start the new exe + self-delete.
             batch_path.write_text(
                 "@echo off\r\n"
-                "ping -n 3 127.0.0.1 >nul\r\n"          # ~2 s wait (reliable cross-OS)
-                f"move /y \"{new_exe}\" \"{current_exe}\"\r\n"
-                f"start \"QytCroRec\" \"{current_exe}\"\r\n"
-                f"(goto) 2>nul & del /f /q \"%~f0\"\r\n",  # self-delete
+                "setlocal\r\n"
+                f"set EXE=\"{current_exe}\"\r\n"
+                f"set NEW=\"{new_exe}\"\r\n"
+                "set /a TRIES=0\r\n"
+                ":retry\r\n"
+                "ping -n 2 127.0.0.1 >nul\r\n"
+                "move /y %NEW% %EXE% >nul 2>&1\r\n"
+                "if not errorlevel 1 goto launch\r\n"
+                "set /a TRIES+=1\r\n"
+                "if %TRIES% lss 60 goto retry\r\n"
+                "echo Failed to replace exe after 60 tries. >> \"%~dp0_qyt_update.log\"\r\n"
+                "goto end\r\n"
+                ":launch\r\n"
+                "start \"\" %EXE%\r\n"
+                ":end\r\n"
+                "(goto) 2>nul & del /f /q \"%~f0\"\r\n",
                 encoding="ascii"
             )
             subprocess.Popen(
@@ -3928,6 +3961,7 @@ class MainWindow(QMainWindow):
     _global_shortcut_sig  = pyqtSignal(str)
     _update_available_sig = pyqtSignal(object, dict)   # (AutoUpdater, info_dict)
     _update_done_sig      = pyqtSignal(bool)           # ok
+    _update_progress_sig  = pyqtSignal(int, int)       # received, total
 
     def __init__(self):
         super().__init__()
@@ -3962,6 +3996,9 @@ class MainWindow(QMainWindow):
         self._global_shortcut_sig.connect(self._app_hotkey_fired_gui)
         self._update_available_sig.connect(self._prompt_update)
         self._update_done_sig.connect(self._on_update_done)
+        self._update_progress_sig.connect(self._on_update_progress)
+        self._update_dlg = None      # QProgressDialog (created on demand)
+        self._updating   = False     # True after user confirms — bypass closeEvent prompt
 
         self._build_ui()
         self._apply_shortcuts()
@@ -4115,36 +4152,84 @@ class MainWindow(QMainWindow):
         msg.button(QMessageBox.StandardButton.No ).setText("Later")
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
+        self._updating = True   # bypass closeEvent dialog when we quit
         self._set_status("Downloading update…", "#f9e2af")
+        # Progress dialog — modal, cancellable
+        from PyQt6.QtWidgets import QProgressDialog
+        self._update_dlg = QProgressDialog(
+            f"Downloading QytCroRec v{info['version']}…",
+            "Cancel", 0, 100, self)
+        self._update_dlg.setWindowTitle("Updating")
+        self._update_dlg.setMinimumDuration(0)
+        self._update_dlg.setAutoClose(False)
+        self._update_dlg.setAutoReset(False)
+        self._update_dlg.setValue(0)
+        self._update_dlg.show()
         # Run download off the GUI thread so UI doesn't freeze
         def _do_download():
             target = Path(__file__).resolve()
-            ok = upd.download_and_install(target, new_version=info["version"])
+            def _prog(rec, tot):
+                self._update_progress_sig.emit(rec, tot)
+            ok = upd.download_and_install(target,
+                                          new_version=info["version"],
+                                          progress_cb=_prog)
             self._update_done_sig.emit(ok)   # signal marshals to GUI thread safely
         threading.Thread(target=_do_download, daemon=True).start()
 
-    def _on_update_done(self, ok: bool):
-        if ok:
-            self._set_status("Update downloaded — restarting…", "#a6e3a1")
-            # singleShot here is fine — we ARE on the GUI thread (called via signal)
-            QTimer.singleShot(600, self._restart_app)
+    def _on_update_progress(self, received: int, total: int):
+        if not self._update_dlg: return
+        if total > 0:
+            pct = int(received * 100 / total)
+            self._update_dlg.setValue(pct)
+            mb_r = received / (1024 * 1024)
+            mb_t = total    / (1024 * 1024)
+            self._update_dlg.setLabelText(
+                f"Downloading…  {mb_r:.1f} / {mb_t:.1f} MB  ({pct}%)")
         else:
+            # Unknown size — show a busy state with received MB
+            mb_r = received / (1024 * 1024)
+            self._update_dlg.setLabelText(f"Downloading…  {mb_r:.1f} MB")
+
+    def _on_update_done(self, ok: bool):
+        if self._update_dlg:
+            self._update_dlg.close()
+            self._update_dlg = None
+        if ok:
+            self._set_status("Update downloaded — restarting in 1 s…", "#a6e3a1")
+            # Quick handoff to the batch swap script.
+            QTimer.singleShot(800, self._restart_app)
+        else:
+            self._updating = False
             QMessageBox.warning(self, "Update Failed",
                 "Could not download the update.  See console for details.")
 
     def _restart_app(self):
-        """Relaunch and quit this instance.  Handles both exe and script mode."""
-        self._storage.save_groups(self._groups)
+        """Relaunch and quit this instance.  Handles both exe and script mode.
+        For exe mode the batch swap script launched by AutoUpdater is waiting
+        for the running exe to release its file handle — so we MUST exit hard.
+        Plain QApplication.quit() can be delayed by lingering daemon threads
+        or unflushed timers; os._exit guarantees release within milliseconds.
+        """
+        try:
+            self._storage.save_groups(self._groups)
+        except Exception as e:
+            print(f"Pre-quit save failed: {e}")
+        # Hide the window first so user sees something happening
+        try: self.hide()
+        except Exception: pass
         if getattr(sys, "frozen", False):
-            # Exe mode: batch swap script already launched by AutoUpdater —
-            # just quit so the batch can overwrite the exe while it's not running.
-            QApplication.quit()
+            # Exe mode: batch is polling for file lock release.  Kill the
+            # process hard so the lock drops within ~1 batch retry cycle (2 s).
+            try: QApplication.quit()
+            except Exception: pass
+            os._exit(0)
         else:
             try:
                 subprocess.Popen([sys.executable, str(Path(__file__).resolve())])
             except Exception as e:
                 print(f"Restart failed: {e}")
             QApplication.quit()
+            os._exit(0)
 
     # ── Misc ─────────────────────────────────────────────────────────────────
 
@@ -5466,6 +5551,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._storage.save_groups(self._groups)
+        # If an update is in progress, skip the prompt and quit unconditionally
+        # so the batch swap script can overwrite the exe immediately.
+        if getattr(self, "_updating", False):
+            event.accept()
+            self._quit_app()
+            return
         msg = QMessageBox(self)
         msg.setWindowTitle("QytCroRec")
         msg.setText("What would you like to do?")
