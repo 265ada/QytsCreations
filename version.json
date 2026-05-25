@@ -1,4 +1,4 @@
 {
-  "version": "1.51",
-  "notes": "v1.51: CI workflow opts JavaScript actions into Node.js 24 ahead of GitHub's 2026-06-02 forced cutover and 2026-09-16 Node 20 removal. No more deprecation warnings in build logs."
+  "version": "1.52",
+  "notes": "v1.52: Visual Pixel Guard region picker. New '📐 Pick Region on Screen' button in the Guard tab — click it, then drag a rectangle around the area to monitor (e.g. the minimap label 'The Raft'). Rectangle auto-converts to X/Y/W/H percentages of the target window. Bonus '⬜ Use Full Window' button. Events/groups persist across update as always."
 }

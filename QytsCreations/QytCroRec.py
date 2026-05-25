@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.51"
+__version__ = "1.52"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -3292,6 +3292,26 @@ class LaneWidget(QWidget):
         btn_test = QPushButton("🔍 Test OCR"); btn_test.clicked.connect(self._test_ocr)
         cap_row.addWidget(btn_test); cap_row.addStretch()
         gl_cap.addLayout(cap_row)
+        # ── Visual region picker — drag a box on screen to set X/Y/W/H ───────
+        pick_row = QHBoxLayout()
+        btn_pick_region = QPushButton("📐 Pick Region on Screen")
+        btn_pick_region.setToolTip(
+            "Click then drag a rectangle on screen (over your target window)\n"
+            "to set the guard's capture area visually.\n"
+            "Rectangle is auto-converted to X/Y/W/H percentages of the target window.")
+        btn_pick_region.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #74c7ec,stop:1 #1c70c0);color:#ffffff;border:2px solid #89dceb;"
+            "border-radius:6px;padding:6px 14px;font-weight:bold;}"
+            "QPushButton:hover{background:#3aa0d8;border-color:#a0e0ff;}")
+        btn_pick_region.clicked.connect(self._pick_guard_region)
+        pick_row.addWidget(btn_pick_region)
+        btn_full = QPushButton("⬜ Use Full Window")
+        btn_full.setToolTip("Set capture region to entire target window (0,0,1,1)")
+        btn_full.clicked.connect(self._guard_region_full_window)
+        pick_row.addWidget(btn_full)
+        pick_row.addStretch()
+        gl_cap.addLayout(pick_row)
         lay.addWidget(grp_cap)
 
         grp_cor = QGroupBox("Correction")
@@ -4060,6 +4080,157 @@ class LaneWidget(QWidget):
         self._macro.pixel_guard_cap_w_pct = self._guard_cap_w_spin.value()
         self._macro.pixel_guard_cap_h_pct = self._guard_cap_h_spin.value()
         self.changed.emit(self._macro.id)
+
+    def _guard_region_full_window(self):
+        """Set capture region to the whole target window (0,0,1,1)."""
+        for sp_attr, val in (("_guard_cap_x_spin", 0.0), ("_guard_cap_y_spin", 0.0),
+                              ("_guard_cap_w_spin", 1.0), ("_guard_cap_h_spin", 1.0)):
+            sp = getattr(self, sp_attr, None)
+            if sp:
+                sp.blockSignals(True); sp.setValue(val); sp.blockSignals(False)
+        self._on_guard_cap_changed()
+        QMessageBox.information(self, "Region Set",
+            "Capture region set to full target window (X=0, Y=0, W=1, H=1).")
+
+    def _pick_guard_region(self):
+        """Show fullscreen translucent overlay; user drags a rectangle.
+        Rectangle is converted to X/Y/W/H percentages of target window
+        client area, then stored on the macro + reflected in spinners."""
+        m = self._macro
+        hwnd = find_window_hwnd(m.target_window_title) if (
+            m.use_target_window and m.target_window_title) else None
+        if not hwnd:
+            QMessageBox.information(self, "Pick Region",
+                "Set 'Force Target Window' and pick a target window first — "
+                "the region is stored as a percentage of that window's client "
+                "area so it tracks if the window moves/resizes.")
+            return
+        # Get target window client rect in SCREEN coords for the overlay
+        try:
+            user32 = ctypes.windll.user32
+            class RECT(ctypes.Structure):
+                _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
+                            ("r", ctypes.c_long), ("b", ctypes.c_long)]
+            cr = RECT()
+            user32.GetClientRect(hwnd, ctypes.byref(cr))
+            pt = ctypes.wintypes.POINT(0, 0)
+            user32.ClientToScreen(hwnd, ctypes.byref(pt))
+            cli_x, cli_y = pt.x, pt.y
+            cli_w, cli_h = cr.r - cr.l, cr.b - cr.t
+        except Exception as e:
+            QMessageBox.warning(self, "Pick Region", f"Cannot read window rect: {e}")
+            return
+        if cli_w <= 0 or cli_h <= 0:
+            QMessageBox.warning(self, "Pick Region",
+                "Target window has zero client area (minimized?). Restore it first.")
+            return
+
+        from PyQt6.QtWidgets import QWidget as _QW
+        from PyQt6.QtCore import QRect as _QR, QPoint as _QP
+
+        class _Overlay(_QW):
+            """Fullscreen translucent overlay that captures a drag-rectangle."""
+            def __init__(self, target_rect, on_done):
+                super().__init__(None, Qt.WindowType.FramelessWindowHint
+                                       | Qt.WindowType.WindowStaysOnTopHint
+                                       | Qt.WindowType.Tool)
+                self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+                # Cover the virtual desktop spanning all monitors
+                screen = QApplication.primaryScreen().virtualGeometry()
+                self.setGeometry(screen)
+                self.setCursor(Qt.CursorShape.CrossCursor)
+                self._target = target_rect   # (x, y, w, h) client area in screen coords
+                self._on_done = on_done
+                self._start: Optional[_QP] = None
+                self._end:   Optional[_QP] = None
+                # Tip label
+                self._tip = QLabel(
+                    "🖱  Drag a rectangle around the area to monitor    "
+                    "[Esc to cancel]", self)
+                self._tip.setStyleSheet(
+                    "background:rgba(0,0,0,200);color:#fff;font-size:14px;"
+                    "padding:8px 14px;border:2px solid #f9e2af;border-radius:6px;")
+                self._tip.adjustSize()
+                self._tip.move(40, 40)
+
+            def paintEvent(self, _e):
+                p = QPainter(self)
+                # Dim the whole screen
+                p.fillRect(self.rect(), QColor(0, 0, 0, 110))
+                # Highlight target window outline in green
+                tx, ty, tw, th = self._target
+                p.setPen(QColor("#a6e3a1"))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(_QR(tx - self.x(), ty - self.y(), tw, th))
+                # Draw the live drag rect in vivid yellow
+                if self._start and self._end:
+                    r = _QR(self._start, self._end).normalized()
+                    p.fillRect(r, QColor(249, 226, 175, 70))
+                    p.setPen(QColor("#f9e2af"))
+                    p.drawRect(r)
+                p.end()
+
+            def keyPressEvent(self, e):
+                if e.key() == Qt.Key.Key_Escape:
+                    self._on_done(None); self.close()
+                else: super().keyPressEvent(e)
+
+            def mousePressEvent(self, e):
+                if e.button() == Qt.MouseButton.LeftButton:
+                    self._start = e.pos(); self._end = e.pos(); self.update()
+
+            def mouseMoveEvent(self, e):
+                if self._start is not None:
+                    self._end = e.pos(); self.update()
+
+            def mouseReleaseEvent(self, e):
+                if e.button() != Qt.MouseButton.LeftButton or not self._start:
+                    return
+                self._end = e.pos()
+                r = _QR(self._start, self._end).normalized()
+                # Convert local overlay coords → absolute screen coords
+                gx = r.x() + self.x(); gy = r.y() + self.y()
+                self._on_done((gx, gy, r.width(), r.height()))
+                self.close()
+
+        def _on_done(rect):
+            if rect is None:
+                return
+            gx, gy, gw, gh = rect
+            if gw < 5 or gh < 5:
+                QMessageBox.information(self, "Pick Region",
+                    "Region too small (need at least 5×5 px). Try again.")
+                return
+            # Convert screen coords → client-area percentages
+            local_x = max(0, gx - cli_x)
+            local_y = max(0, gy - cli_y)
+            local_x = min(local_x, cli_w - 1)
+            local_y = min(local_y, cli_h - 1)
+            x_pct = local_x / cli_w
+            y_pct = local_y / cli_h
+            w_pct = min(gw / cli_w, 1.0 - x_pct)
+            h_pct = min(gh / cli_h, 1.0 - y_pct)
+            for sp_attr, val in (("_guard_cap_x_spin", x_pct),
+                                  ("_guard_cap_y_spin", y_pct),
+                                  ("_guard_cap_w_spin", w_pct),
+                                  ("_guard_cap_h_spin", h_pct)):
+                sp = getattr(self, sp_attr, None)
+                if sp:
+                    sp.blockSignals(True); sp.setValue(round(val, 3)); sp.blockSignals(False)
+            self._on_guard_cap_changed()
+            self._set_status_safe(
+                f"Region set: X={x_pct:.2f} Y={y_pct:.2f} W={w_pct:.2f} H={h_pct:.2f}")
+
+        self._region_overlay = _Overlay(
+            (cli_x, cli_y, cli_w, cli_h), _on_done)
+        self._region_overlay.show()
+        self._region_overlay.raise_()
+        self._region_overlay.activateWindow()
+
+    def _set_status_safe(self, msg: str):
+        mw = self.window()
+        if hasattr(mw, "_set_status"):
+            mw._set_status(msg, "#a6e3a1")
 
     def _test_ocr(self):
         m = self._macro
