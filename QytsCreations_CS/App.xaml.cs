@@ -6,8 +6,46 @@ namespace QytCroRec;
 
 public partial class App : Application
 {
+    private static SplashWindow? _splash;
+    private static Dispatcher?   _splashDispatcher;
+
     protected override void OnStartup(StartupEventArgs e)
     {
+        // ─── Splash on its OWN STA thread + dispatcher ────────────────────
+        // Shows the moment managed code starts running (~50 ms after the
+        // .NET host hands off). Stays responsive while the main thread is
+        // busy loading WPF/JITting/extracting native libs.
+        var splashReady = new System.Threading.ManualResetEventSlim(false);
+        var splashThread = new System.Threading.Thread(() =>
+        {
+            try
+            {
+                _splash = new SplashWindow();
+                _splashDispatcher = _splash.Dispatcher;
+                _splash.Loaded += (_, _) => splashReady.Set();
+                _splash.Show();
+                Dispatcher.Run();
+            }
+            catch (Exception ex) { LogCrash("splash thread: " + ex); splashReady.Set(); }
+        })
+        {
+            IsBackground = true,
+            Name         = "SplashThread"
+        };
+        splashThread.SetApartmentState(System.Threading.ApartmentState.STA);
+        splashThread.Start();
+        splashReady.Wait(3000);
+
+        // Safety net: even if MainWindow.OnLoaded never reaches CloseSplash
+        // (rare — startup exception etc.), force-close after 15 seconds so the
+        // splash can never stick around indefinitely.
+        Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(15));
+            if (_splash != null) CloseSplash();
+        });
+        // ──────────────────────────────────────────────────────────────────
+
         base.OnStartup(e);
 
         // Single-window app — quit when the main window closes.
@@ -49,6 +87,32 @@ public partial class App : Application
         catch { }
         e.Handled = true;       // suppress the WPF "stopped working" dialog
         Shutdown(1);            // and end the app cleanly
+    }
+
+    /// <summary>Called by MainWindow when it's actually visible + interactive.
+    /// Synchronous close-then-shutdown so the splash actually disappears.</summary>
+    public static void CloseSplash()
+    {
+        var splash     = _splash;
+        var dispatcher = _splashDispatcher;
+        _splash = null;
+        _splashDispatcher = null;
+        if (splash == null || dispatcher == null) return;
+
+        try
+        {
+            // Step 1: hide + close the window ON the splash thread, BLOCKING.
+            dispatcher.Invoke(() =>
+            {
+                try { splash.Topmost = false; } catch { }
+                try { splash.Hide();           } catch { }
+                try { splash.Close();          } catch { }
+            });
+        }
+        catch { }
+
+        // Step 2: end the splash thread's dispatcher loop so the thread exits.
+        try { dispatcher.InvokeShutdown(); } catch { }
     }
 
     protected override void OnExit(ExitEventArgs e)

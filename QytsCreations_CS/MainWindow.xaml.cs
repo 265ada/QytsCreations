@@ -69,9 +69,9 @@ public partial class MainWindow : Window
         _pidTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _pidTimer.Tick += (_, _) =>
         {
-            _viewP.RefreshPidStatus();
-            _viewS.RefreshPidStatus();
-            _viewT.RefreshPidStatus();
+            if (_laneBound[0]) _viewP.RefreshPidStatus();
+            if (_laneBound[1]) _viewS.RefreshPidStatus();
+            if (_laneBound[2]) _viewT.RefreshPidStatus();
         };
         _pidTimer.Start();
 
@@ -94,34 +94,67 @@ public partial class MainWindow : Window
     // ═══════════════════════════════════════════════════════════
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        _settings     = _storage.LoadSettings();
-        _shortcutsCfg = _storage.LoadShortcuts();
-        if (_shortcutsCfg.Count == 0) _shortcutsCfg = Shortcuts.Defaults;
-        _guardMacros  = _storage.LoadGuardMacros();
-        RefreshGuardMacroList();
-
-        ChkAutoUpdate.IsChecked = _settings.AutoUpdate;
-        _viewShortcuts.LoadConfig(_shortcutsCfg);
-
-        LoadGroups();
-        RegisterHotkeys();
-        UpdateHotkeyHint();
-
+        // Show version + status IMMEDIATELY so user sees a responsive window.
         string ver = GetVersion();
         VersionLabel.Text = $"v{ver}";
-        Log($"QytCroRec {ver} (C#) loaded — {_groups.Count} group(s)");
-        _storage.DiagLog($"Started v{ver}");
+        StatusLabel.Text  = "Starting…";
 
-        _tray = new TrayService(this);
-        _tray.Initialize();
-        _tray.RequestStopAll += () => Dispatcher.InvokeAsync(StopAll);
-
-        if (_settings.AutoUpdate)
-            _ = Task.Run(async () =>
+        // Defer storage IO + group population off the UI thread so the window
+        // is interactive instantly. Then marshal back to UI thread to apply.
+        Task.Run(() =>
+        {
+            // ── background: file IO + JSON parse (slowest part of startup)
+            var settings     = _storage.LoadSettings();
+            var shortcutsCfg = _storage.LoadShortcuts();
+            if (shortcutsCfg.Count == 0) shortcutsCfg = Shortcuts.Defaults;
+            var guardMacros  = _storage.LoadGuardMacros();
+            var groups       = _storage.LoadGroups();
+            if (groups.Count == 0)
             {
-                var (newer, newVer, log) = await _updater.CheckAsync();
-                if (newer) Dispatcher.InvokeAsync(() => PromptUpdate(newVer, log));
+                var g = new MacroGroup { Name = "Group 1" };
+                g.EnsureLanes();
+                groups.Add(g);
+            }
+
+            // ── back to UI thread: apply everything in one batch
+            Dispatcher.InvokeAsync(() =>
+            {
+                _settings     = settings;
+                _shortcutsCfg = shortcutsCfg;
+                _guardMacros  = guardMacros;
+                RefreshGuardMacroList();
+
+                ChkAutoUpdate.IsChecked = _settings.AutoUpdate;
+                _viewShortcuts.LoadConfig(_shortcutsCfg);
+
+                foreach (var g in groups) _groups.Add(g);
+                GroupList.SelectedIndex = 0;
+
+                RegisterHotkeys();
+                UpdateHotkeyHint();
+
+                _tray = new TrayService(this);
+                _tray.Initialize();
+                _tray.RequestStopAll += () => Dispatcher.InvokeAsync(StopAll);
+
+                StatusLabel.Text = "Ready";
+                Log($"QytCroRec {ver} (C#) loaded — {_groups.Count} group(s)");
+
+                // Main window is now visible + interactive → close the splash.
+                App.CloseSplash();
+
+                // Auto-update check goes even further back — not blocking startup at all.
+                if (_settings.AutoUpdate)
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(2000);   // let UI settle first
+                        var (newer, newVer, log) = await _updater.CheckAsync();
+                        if (newer) Dispatcher.InvokeAsync(() => PromptUpdate(newVer, log));
+                    });
             });
+
+            _storage.DiagLog($"Started v{ver}");
+        });
     }
 
     private bool _forceExit;
@@ -139,7 +172,7 @@ public partial class MainWindow : Window
         try { _hotkeys.Dispose(); }   catch { }
         try { _tray?.Dispose(); }     catch { }
         try { _pidTimer.Stop(); }     catch { }
-        try { SaveCurrentGroup(); }   catch { }
+        try { FlushSave(); }          catch { }
 
         // Belt + braces: schedule a hard exit in case some pump (WinForms NotifyIcon,
         // pinned thread, etc.) keeps the process alive after Shutdown.
@@ -162,21 +195,30 @@ public partial class MainWindow : Window
     // ═══════════════════════════════════════════════════════════
     //  STORAGE / GROUPS
     // ═══════════════════════════════════════════════════════════
-    private void LoadGroups()
+    // ── Debounced save: bumps disk-write to 500ms after last edit, never on every keystroke.
+    private DispatcherTimer? _saveDebounce;
+    private void SaveCurrentGroup()
     {
-        var loaded = _storage.LoadGroups();
-        _groups.Clear();
-        foreach (var g in loaded) _groups.Add(g);
-        if (_groups.Count == 0)
+        if (_saveDebounce == null)
         {
-            var g = new MacroGroup { Name = "Group 1" };
-            g.EnsureLanes();
-            _groups.Add(g);
+            _saveDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _saveDebounce.Tick += (_, _) =>
+            {
+                _saveDebounce!.Stop();
+                var snapshot = _groups.ToArray();
+                Task.Run(() => _storage.SaveGroups(snapshot));   // off UI thread
+            };
         }
-        GroupList.SelectedIndex = 0;
+        _saveDebounce.Stop();
+        _saveDebounce.Start();
     }
 
-    private void SaveCurrentGroup() => _storage.SaveGroups([.. _groups]);
+    /// <summary>Force-flush pending debounced save (used on close).</summary>
+    private void FlushSave()
+    {
+        try { _saveDebounce?.Stop(); } catch { }
+        try { _storage.SaveGroups([.. _groups]); } catch { }
+    }
 
     private void RefreshGuardMacroList()
     {
@@ -237,6 +279,7 @@ public partial class MainWindow : Window
     {
         if (_curGroup == null || _recording) return;
         if (laneIndex < 0 || laneIndex >= 3) return;
+        BindLaneIfNeeded(laneIndex);
         var lane = _curGroup.Lanes[laneIndex];
         _recordLaneIndex = laneIndex;
 
@@ -489,12 +532,16 @@ public partial class MainWindow : Window
     // ═══════════════════════════════════════════════════════════
     //  LOAD GROUP INTO UI
     // ═══════════════════════════════════════════════════════════
+    // Track which lanes for the current group have been bound to their LaneView already.
+    private readonly bool[] _laneBound = new bool[3];
+
     private void LoadGroupToUi(MacroGroup g)
     {
         g.EnsureLanes();
-        _viewP.Bind(g, 0, _guardMacros);
-        _viewS.Bind(g, 1, _guardMacros);
-        _viewT.Bind(g, 2, _guardMacros);
+
+        // Only bind the currently active lane upfront — others bind lazily on tab switch.
+        Array.Clear(_laneBound, 0, 3);
+        BindLaneIfNeeded(Math.Clamp(_currentLaneTab, 0, 2));
 
         // pixel guard panel
         int src = Math.Clamp(g.SharedGuardLane >= 0 ? g.SharedGuardLane : 0, 0, 2);
@@ -506,12 +553,25 @@ public partial class MainWindow : Window
         RefreshRunsLabel();
     }
 
+    private void BindLaneIfNeeded(int laneIndex)
+    {
+        if (_curGroup == null) return;
+        if (laneIndex < 0 || laneIndex > 2) return;
+        if (_laneBound[laneIndex]) return;
+        var view = laneIndex switch { 0 => _viewP, 1 => _viewS, _ => _viewT };
+        view.Bind(_curGroup, laneIndex, _guardMacros);
+        _laneBound[laneIndex] = true;
+    }
+
     // ═══════════════════════════════════════════════════════════
     //  TABS
     // ═══════════════════════════════════════════════════════════
     private void LaneTabs_SelectionChanged(object s, SelectionChangedEventArgs e)
     {
         _currentLaneTab = LaneTabs.SelectedIndex;
+        if (_currentLaneTab >= 0 && _currentLaneTab <= 2)
+            Dispatcher.InvokeAsync(() => BindLaneIfNeeded(_currentLaneTab),
+                System.Windows.Threading.DispatcherPriority.Background);
     }
 
     // ═══════════════════════════════════════════════════════════
