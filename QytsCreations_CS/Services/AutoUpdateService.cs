@@ -17,6 +17,9 @@ public class AutoUpdateService
     public event Action<string>? StatusUpdate;
     public event Action<string, string>? UpdateAvailable; // (newVer, changelog)
 
+    /// <summary>Expected SHA256 (hex, lowercase) of the new exe, fetched from version.json.</summary>
+    public string ExpectedSha256 { get; private set; } = "";
+
     public AutoUpdateService(string currentVersion)
     {
         CurrentVersion = currentVersion;
@@ -31,6 +34,7 @@ public class AutoUpdateService
             var info = JsonConvert.DeserializeObject<Dictionary<string, string>>(json) ?? new();
             string newVer    = info.GetValueOrDefault("version",   "");
             string changelog = info.GetValueOrDefault("changelog", "");
+            ExpectedSha256   = (info.GetValueOrDefault("sha256", "") ?? "").Trim().ToLowerInvariant();
             if (string.IsNullOrEmpty(newVer)) return (false, "", "");
             bool newer = CompareVersions(newVer, CurrentVersion) > 0;
             if (newer) UpdateAvailable?.Invoke(newVer, changelog);
@@ -56,6 +60,41 @@ public class AutoUpdateService
             using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
             var bytes = await http.GetByteArrayAsync(ExeUrl);
             await File.WriteAllBytesAsync(newExe, bytes);
+
+            // ── Integrity check ────────────────────────────────────────────
+            // Cheap sanity gate first.
+            if (bytes.Length < 50 * 1024) { try { File.Delete(newExe); } catch { }
+                StatusUpdate?.Invoke($"Update too small ({bytes.Length} bytes) — refused.");
+                return false; }
+            if (bytes.Length < 2 || bytes[0] != 0x4D || bytes[1] != 0x5A) {
+                try { File.Delete(newExe); } catch { }
+                StatusUpdate?.Invoke("Update bytes don't start with MZ — refused.");
+                return false; }
+
+            // SHA256 check — the only real defense against a poisoned release.
+            if (!string.IsNullOrEmpty(ExpectedSha256))
+            {
+                string actual;
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                {
+                    var hash = sha.ComputeHash(bytes);
+                    actual = Convert.ToHexString(hash).ToLowerInvariant();
+                }
+                if (actual != ExpectedSha256)
+                {
+                    try { File.Delete(newExe); } catch { }
+                    StatusUpdate?.Invoke(
+                        $"SHA256 MISMATCH — refusing update.\n" +
+                        $"  expected: {ExpectedSha256}\n" +
+                        $"  got:      {actual}");
+                    return false;
+                }
+                StatusUpdate?.Invoke($"sha256 ok: {actual[..16]}…");
+            }
+            else
+            {
+                StatusUpdate?.Invoke("WARNING: server version.json had no sha256 — skipping integrity check.");
+            }
 
             string batchPath = Path.Combine(tmpDir, $"_qyt_cs_upd_{Process.GetCurrentProcess().Id}.bat");
             string batch = BuildUpdateBatch(currentExe, newExe, backupExe);

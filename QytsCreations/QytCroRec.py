@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.67"
+__version__ = "1.68"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2214,7 +2214,12 @@ class AutoUpdater:
         except Exception: return (0,)
 
     def check(self, timeout: float = 4.0) -> Optional[dict]:
-        """Return {'version': str, 'notes': str} if remote newer, else None."""
+        """Return {'version': str, 'notes': str, 'sha256': str} if remote newer, else None.
+
+        sha256: optional hex string. If present in version.json and we're in
+        exe-mode, download_and_install() will REFUSE to swap if the downloaded
+        bytes don't match. This is the defense against a poisoned release
+        binary (the only thing TLS + GitHub auth don't catch by themselves)."""
         if not self.version_url or "YOUR_USER" in self.version_url:
             return None
         try:
@@ -2225,7 +2230,11 @@ class AutoUpdater:
             return None
         remote = info.get("version", "0")
         if self._vtuple(remote) > self._vtuple(self.current):
-            return {"version": remote, "notes": info.get("notes", "")}
+            return {
+                "version": remote,
+                "notes":   info.get("notes", ""),
+                "sha256":  (info.get("sha256") or "").strip().lower(),
+            }
         return None
 
     # Last error message from download_and_install, surfaced to UI on failure
@@ -2234,6 +2243,7 @@ class AutoUpdater:
     def download_and_install(self, target_path: Path,
                              timeout: float = 600.0,
                              new_version: str = "",
+                             expected_sha256: str = "",
                              progress_cb=None) -> bool:
         """Download update and swap in.  Returns True on success.
         Exe mode: downloads new exe, writes a batch swap script that
@@ -2311,6 +2321,44 @@ class AutoUpdater:
                 except Exception: pass
                 return _fail(f"Not a valid Windows exe (first 2 bytes = {head!r}) — "
                              f"server may have returned HTML / redirect page.")
+
+            # ── SHA256 integrity check ───────────────────────────────────────
+            # version.json should ship "sha256" alongside "version".  We compute
+            # the hash of the downloaded bytes and refuse to swap on mismatch.
+            # This is the ONLY defense against a poisoned release binary —
+            # TLS and GitHub auth protect the channel, not the artifact.
+            expected = (expected_sha256 or "").strip().lower()
+            if expected:
+                import hashlib
+                h = hashlib.sha256()
+                try:
+                    with open(partial_exe, "rb") as fp:
+                        for chunk in iter(lambda: fp.read(1 << 20), b""):
+                            h.update(chunk)
+                    actual_sha = h.hexdigest().lower()
+                except Exception as e:
+                    try: partial_exe.unlink()
+                    except Exception: pass
+                    return _fail(f"SHA256 read failed: {e}")
+                if actual_sha != expected:
+                    try: partial_exe.unlink()
+                    except Exception: pass
+                    return _fail(
+                        f"SHA256 MISMATCH — refusing to install.\n"
+                        f"  expected: {expected}\n"
+                        f"  got:      {actual_sha}\n"
+                        f"Either the release was tampered with, or the "
+                        f"version.json on the server is stale.  Open an "
+                        f"issue if you're sure the release is genuine.")
+                print(f"[update] sha256 ok: {actual_sha[:16]}…")
+            else:
+                # Strict-mode toggle: when an update is delivered without a
+                # checksum at all, log a warning but don't block.  Once every
+                # release ships a hash, flip this to a hard fail.
+                print("[update] WARNING: version.json had no sha256 — "
+                      "skipping integrity check.  Server should publish a hash.")
+                _log_crash("[update] sha256 absent — running without integrity verify")
+
             # Atomic rename .partial → final
             try:
                 if new_exe.exists(): new_exe.unlink()
@@ -4882,6 +4930,7 @@ class MainWindow(QMainWindow):
                     self._update_progress_sig.emit(rec, tot)
                 ok = upd.download_and_install(target,
                                               new_version=info["version"],
+                                              expected_sha256=info.get("sha256", ""),
                                               progress_cb=_prog)
                 if not ok:
                     err = upd.last_error or "Unknown failure (see crash.log)"

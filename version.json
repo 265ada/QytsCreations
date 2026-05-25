@@ -1,4 +1,5 @@
-{
-  "version": "1.67",
-  "notes": "v1.67: END key stops all macros. TTS on record start/end (speaks lane name + complete). After Primary records, auto-switches to next enabled empty lane and shows 2-second fade-in toast with record hotkey reminder. All lanes now start simultaneously via threading.Barrier before first event fires."
+﻿{
+    "sha256":  "f29a076ee277f99510443f01e2fcc2cf530fd0f167722e383635a20944c0fa40",
+    "version":  "1.68",
+    "notes":  "v1.68: SHA256 integrity verification for auto-updater. Refuses to install a downloaded exe whose hash doesn\u0027t match the value in version.json — defends against a poisoned release binary even if TLS or the GitHub channel is compromised. version.json now ships a \u0027sha256\u0027 field with every release."
 }
