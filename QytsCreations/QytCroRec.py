@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.56"
+__version__ = "1.57"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2158,15 +2158,20 @@ class AutoUpdater:
             if not self.exe_url:
                 return _fail("No EXE update URL configured.")
             current_exe = Path(sys.executable)
-            # Use a SINGLE static temp name — older versions used
-            # QytCroRec_v{ver}.exe but every failed update left an orphan
-            # exe behind, cluttering the install folder.  Static name means
-            # the next download overwrites the previous attempt's leftover.
-            new_exe      = current_exe.with_name("QytCroRec_new.exe")
-            partial_exe  = current_exe.with_name("QytCroRec_new.exe.partial")
-            backup_exe   = current_exe.with_name("QytCroRec_backup.exe")
-            batch_path   = current_exe.with_name("_qyt_update.bat")
-            log_path     = current_exe.with_name("_qyt_update.log")
+            # Download + staging files go to %TEMP% so we never need the exe's
+            # own folder to be writable at download time.  The batch script does
+            # the final "move %NEW% %EXE%" after our process exits — by then
+            # Windows only needs the exe directory to be writable for one move,
+            # which works even from a build/dist subfolder that was previously
+            # blocked while the process held a handle on its own DLLs.
+            _tmp_dir    = Path(os.environ.get("TEMP") or os.environ.get("TMP")
+                               or str(Path.home()))
+            new_exe     = _tmp_dir / "QytCroRec_new.exe"
+            partial_exe = _tmp_dir / "QytCroRec_new.exe.partial"
+            batch_path  = _tmp_dir / "_qyt_update.bat"
+            log_path    = _tmp_dir / "_qyt_update.log"
+            # Backup stays next to the real exe (batch writes it after we exit)
+            backup_exe  = current_exe.with_name("QytCroRec_backup.exe")
             # ── Stream download to .partial file, verify, then rename ────────
             try:
                 req = urllib.request.Request(
@@ -2240,7 +2245,7 @@ class AutoUpdater:
             # Single-instance lock — refuse to spawn a second update batch if
             # one's already running.  Defined HERE (before batch write) so the
             # f-string below can embed the path.
-            lock_path = current_exe.with_name("_qyt_update.lock")
+            lock_path = _tmp_dir / "_qyt_update.lock"
             if lock_path.exists():
                 try:
                     age = time.time() - lock_path.stat().st_mtime
@@ -4507,31 +4512,45 @@ class MainWindow(QMainWindow):
                 "or prefer to update manually from GitHub Releases.")
 
     def _cleanup_update_orphans(self):
-        """Delete leftover QytCroRec_v*.exe / .partial / old backup files from
-        failed updates on older versions.  Silent — best-effort, no UI."""
+        """Delete leftover QytCroRec_v*.exe / .partial / old backup / batch
+        files from failed updates on older versions.  Checks both the install
+        dir (pre-v1.57 leftovers) and %TEMP% (v1.57+ staging dir).  Silent."""
         if not getattr(sys, "frozen", False):
             return
         import re
         install_dir = Path(sys.executable).parent
-        # Patterns: versioned exes, partial downloads, old per-version backups
-        patterns = [
-            re.compile(r"^QytCroRec_v[\d.]+\.exe$",       re.I),
-            re.compile(r"^QytCroRec_v[\d.]+\.exe\.partial$", re.I),
-            re.compile(r"^QytCroRec_backup_v[\d.]+\.exe$", re.I),
-            re.compile(r"^QytCroRec_new\.exe\.partial$",  re.I),
-            # Stale leftovers from failed batch swaps — safe to nuke on
-            # startup because if WE are running, no batch is mid-swap.
-            re.compile(r"^_qyt_update\.bat$",  re.I),
-            re.compile(r"^_qyt_update\.lock$", re.I),
+        tmp_dir = Path(os.environ.get("TEMP") or os.environ.get("TMP")
+                       or str(Path.home()))
+        # Patterns: versioned exes, partial downloads, old per-version backups,
+        # stale batch/lock files.  Safe to nuke on startup because if WE are
+        # running, no batch is mid-swap.
+        install_patterns = [
+            re.compile(r"^QytCroRec_v[\d.]+\.exe$",          re.I),
+            re.compile(r"^QytCroRec_v[\d.]+\.exe\.partial$",  re.I),
+            re.compile(r"^QytCroRec_backup_v[\d.]+\.exe$",    re.I),
+            re.compile(r"^QytCroRec_new\.exe(?:\.partial)?$", re.I),
+            re.compile(r"^_qyt_update\.bat$",                 re.I),
+            re.compile(r"^_qyt_update\.lock$",                re.I),
         ]
-        for f in install_dir.iterdir():
-            if not f.is_file(): continue
-            if any(p.match(f.name) for p in patterns):
-                try:
-                    f.unlink()
-                    print(f"[cleanup] removed orphan: {f.name}")
-                except Exception as e:
-                    print(f"[cleanup] cannot remove {f.name}: {e}")
+        tmp_patterns = [
+            re.compile(r"^QytCroRec_new\.exe(?:\.partial)?$", re.I),
+            re.compile(r"^_qyt_update\.bat$",                 re.I),
+            re.compile(r"^_qyt_update\.lock$",                re.I),
+        ]
+        for search_dir, pats in ((install_dir, install_patterns),
+                                 (tmp_dir,     tmp_patterns)):
+            try:
+                entries = list(search_dir.iterdir())
+            except Exception:
+                continue
+            for f in entries:
+                if not f.is_file(): continue
+                if any(p.match(f.name) for p in pats):
+                    try:
+                        f.unlink()
+                        print(f"[cleanup] removed orphan: {f}")
+                    except Exception as e:
+                        print(f"[cleanup] cannot remove {f}: {e}")
 
     def _check_for_updates(self, manual: bool = False):
         """Runs in a daemon thread — uses signal to marshal result to GUI thread.
