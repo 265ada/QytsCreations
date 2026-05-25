@@ -1,4 +1,4 @@
 {
-  "version": "1.66",
-  "notes": "v1.66: Right-click Runs/Executions labels to reset counters (all groups or per-group). Fix detours pipe-break error spam in crash log — game closing while macro runs is expected, now logs to console only not crash file."
+  "version": "1.67",
+  "notes": "v1.67: END key stops all macros. TTS on record start/end (speaks lane name + complete). After Primary records, auto-switches to next enabled empty lane and shows 2-second fade-in toast with record hotkey reminder. All lanes now start simultaneously via threading.Barrier before first event fires."
 }

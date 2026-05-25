@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.66"
+__version__ = "1.67"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -254,7 +254,7 @@ SHORTCUT_DEFS = [
     ("toggle_record",   "Record / Stop Recording",     "Ctrl+R"),
     ("play",            "Play Macro",                  "F5"),
     ("stop",            "Stop Current Macro",          "F6"),
-    ("stop_all",        "Stop All Macros",             "Ctrl+F6"),
+    ("stop_all",        "Stop All Macros",             "End"),
     ("clear_events",    "Clear All Events",            "Ctrl+L"),
     ("capture_window",  "Capture Target Window (3 s)", "Ctrl+W"),
     ("del_events",      "Delete Selected Events",      "Delete"),
@@ -1947,12 +1947,15 @@ class ChainPlayerThread(QThread):
                 _lane_hwnds[_li] = _h
 
         # ── Each lane gets its OWN independent rep loop ───────────────────────
-        # Lanes start simultaneously but do NOT wait for each other between
-        # reps.  Primary's repeat count governs when the chain stops — when
-        # Primary finishes its reps the stop event fires so all lanes exit.
-        # Secondary/Third cycle at their own pace (a faster lane just loops
-        # more; a slower lane might be mid-rep when Primary finishes).
+        # A threading.Barrier ensures all lane threads reach the start point
+        # simultaneously before any fires its first event.  After that, each
+        # lane cycles at its own pace — no waiting for each other between reps.
+        _start_barrier = threading.Barrier(len(active))
+
         def _lane_loop(lane_idx, lane, hwnd_pre=None):
+            # Wait until every active lane thread is ready, then all fire together
+            try: _start_barrier.wait(timeout=10)
+            except threading.BrokenBarrierError: return
             lane_reps = reps if lane_idx == 0 else 10_000_000
             for rep in range(lane_reps):
                 if self._stop.is_set():
@@ -6542,6 +6545,7 @@ class MainWindow(QMainWindow):
         self._recording_lane = macro_id
         self._flash_timer.start(600)
         sound_record_start()
+        speak(f"Recording {m.name}")
         self._set_status(f"● REC lane '{m.name}'", "#f38ba8")
         rec.begin()
 
@@ -6583,11 +6587,73 @@ class MainWindow(QMainWindow):
                     lw._enable_chk.blockSignals(False)
         self._recording_lane = None
         sound_record_stop()
+        speak("Recording complete")
+        # After primary records, auto-switch to next unrecorded lane and show toast
+        if lw and lw._is_primary and self._cur_group:
+            g = self._cur_group
+            for next_idx, next_lane in enumerate(g.lanes[1:], start=1):
+                if next_lane.lane_enabled and not next_lane.events:
+                    QTimer.singleShot(300, lambda ni=next_idx: self._switch_to_lane_with_toast(ni))
+                    break
         # Final save after recording — move to background so GUI doesn't hitch
         _snap = self._groups[:]
         threading.Thread(
             target=lambda: self._storage.save_groups(_snap),
             daemon=True).start()
+
+    def _switch_to_lane_with_toast(self, lane_idx: int):
+        """Switch lane tab to lane_idx and show a 2-second non-blocking toast."""
+        if not self._cur_group: return
+        lane_names = ["Primary", "Secondary", "Third"]
+        name = lane_names[lane_idx] if lane_idx < len(lane_names) else f"Lane {lane_idx+1}"
+        # Switch tab
+        tab_count = self._lane_tabs.count()
+        if lane_idx < tab_count - 1:   # -1 for Shortcuts tab
+            self._lane_tabs.setCurrentIndex(lane_idx)
+        # Look up the record hotkey to show in the toast
+        rec_key = self._sc_config.get("toggle_record",
+                  DEFAULT_SHORTCUTS.get("toggle_record", "Ctrl+R"))
+        self._show_lane_toast(
+            f"🎙  {name} ready — press  {rec_key}  to record\n"
+            f"This lane has no events yet. Record now or close and record later.",
+            duration_ms=3000)
+
+    def _show_lane_toast(self, message: str, duration_ms: int = 2500):
+        """Show a frameless floating toast that auto-dismisses after duration_ms."""
+        from PyQt6.QtWidgets import QLabel
+        toast = QLabel(message, self)
+        toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        toast.setStyleSheet(
+            "QLabel { background: #1e1e2e; color: #cdd6f4; "
+            "font-size: 13px; font-weight: bold; padding: 18px 28px; "
+            "border: 2px solid #89b4fa; border-radius: 12px; }")
+        toast.setWordWrap(True)
+        toast.adjustSize()
+        # Centre the toast in the main window
+        pw, ph = self.width(), self.height()
+        tw, th = toast.width(), toast.height()
+        toast.move((pw - tw) // 2, (ph - th) // 2)
+        toast.raise_()
+        toast.show()
+        # Fade in via opacity effect
+        from PyQt6.QtWidgets import QGraphicsOpacityEffect
+        from PyQt6.QtCore import QPropertyAnimation
+        eff = QGraphicsOpacityEffect(toast)
+        toast.setGraphicsEffect(eff)
+        anim_in = QPropertyAnimation(eff, b"opacity")
+        anim_in.setDuration(300)
+        anim_in.setStartValue(0.0)
+        anim_in.setEndValue(1.0)
+        anim_in.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        # Auto-close after duration — fade out then delete
+        def _fade_out():
+            anim_out = QPropertyAnimation(eff, b"opacity")
+            anim_out.setDuration(400)
+            anim_out.setStartValue(1.0)
+            anim_out.setEndValue(0.0)
+            anim_out.finished.connect(toast.deleteLater)
+            anim_out.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        QTimer.singleShot(duration_ms, _fade_out)
 
     def _build_shortcut_filter(self) -> set:
         skip = set()
