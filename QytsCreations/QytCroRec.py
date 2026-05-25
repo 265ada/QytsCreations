@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.57"
+__version__ = "1.58"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2962,44 +2962,84 @@ class LaneWidget(QWidget):
             self._btn_record.setText("⏹ Stop Rec")
             self._status_lbl.setText("● REC")
             self._status_lbl.setStyleSheet("color: #f38ba8; font-weight: bold;")
+            self._pending_events = []   # clear any leftover from previous take
         else:
             self._btn_record.setText("⏺ Record")
             self._status_lbl.setText("Idle")
             self._status_lbl.setStyleSheet("color: #585b70;")
+            # Flush + stop the batch timer — _fill_table() called by _on_rec_done
+            # will rebuild the whole table cleanly anyway.
+            if hasattr(self, "_flush_timer"):
+                self._flush_timer.stop()
+            self._pending_events = []
 
     def add_event(self, ev: dict):
-        """Append one live-captured event to the table (during recording)."""
+        """Append one live-captured event (during recording).
+
+        Table rows are flushed in batches via a 150ms timer so the GUI thread
+        is never blocked by rapid insertRow/setItem/paint calls during fast
+        recording (mouse-move flood, held keys, etc.).  The event is appended
+        to _macro.events immediately so data is never lost even if the timer
+        hasn't fired yet.
+        """
         self._macro.events.append(ev)
-        idx = len(self._macro.events) - 1
-        row = self._table.rowCount()
-        self._table.insertRow(row)
+        # Accumulate pending events; the flush timer will render them in batch.
+        if not hasattr(self, "_pending_events"):
+            self._pending_events = []
+        self._pending_events.append(ev)
+        n = len(self._macro.events)
+        self._ev_count.setText(f"{n} events")
+        # Start (or restart) the 150ms batch-render timer.
+        if not hasattr(self, "_flush_timer"):
+            self._flush_timer = QTimer(self)
+            self._flush_timer.setSingleShot(True)
+            self._flush_timer.setInterval(150)
+            self._flush_timer.timeout.connect(self._flush_pending_events)
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_pending_events(self):
+        """Render any pending recorded events into the table in one pass."""
+        pending = getattr(self, "_pending_events", [])
+        if not pending:
+            return
+        self._pending_events = []
         _ro = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        total = len(self._macro.events)
+        start_idx = total - len(pending)   # index of first pending event
+        self._table.setUpdatesEnabled(False)
+        try:
+            for i, ev in enumerate(pending):
+                idx = start_idx + i
+                row = self._table.rowCount()
+                self._table.insertRow(row)
 
-        num_it = QTableWidgetItem(str(idx + 1)); num_it.setFlags(_ro)
-        self._table.setItem(row, 0, num_it)
+                num_it = QTableWidgetItem(str(idx + 1)); num_it.setFlags(_ro)
+                self._table.setItem(row, 0, num_it)
 
-        self._table.setItem(row, 1, self._make_delay_item(idx))
+                self._table.setItem(row, 1, self._make_delay_item(idx))
 
-        ti = QTableWidgetItem(ev["event_type"])
-        ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
-        ti.setFlags(_ro)
-        self._table.setItem(row, 2, ti)
+                ti = QTableWidgetItem(ev["event_type"])
+                ti.setForeground(QColor(EVENT_COLORS.get(ev["event_type"], "#cdd6f4")))
+                ti.setFlags(_ro)
+                self._table.setItem(row, 2, ti)
 
-        det = QTableWidgetItem(event_summary(ev)); det.setFlags(_ro)
-        self._table.setItem(row, 3, det)
+                det = QTableWidgetItem(event_summary(ev)); det.setFlags(_ro)
+                self._table.setItem(row, 3, det)
 
-        gitem = QTableWidgetItem()
-        gitem.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable |
-                       Qt.ItemFlag.ItemIsUserCheckable)
-        gitem.setCheckState(Qt.CheckState.Unchecked)
-        self._table.setItem(row, 4, gitem)
+                gitem = QTableWidgetItem()
+                gitem.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable |
+                               Qt.ItemFlag.ItemIsUserCheckable)
+                gitem.setCheckState(Qt.CheckState.Unchecked)
+                self._table.setItem(row, 4, gitem)
 
-        ph = QTableWidgetItem(""); ph.setFlags(_ro)
-        self._table.setItem(row, 5, ph)
+                ph = QTableWidgetItem(""); ph.setFlags(_ro)
+                self._table.setItem(row, 5, ph)
 
-        self._row_event_idx.append(idx)
+                self._row_event_idx.append(idx)
+        finally:
+            self._table.setUpdatesEnabled(True)
         self._table.scrollToBottom()
-        self._ev_count.setText(f"{idx + 1} events")
 
     def highlight_event(self, idx: int):
         if 0 <= idx < self._table.rowCount():
@@ -6223,14 +6263,29 @@ class MainWindow(QMainWindow):
             record_mouse_move=m.record_mouse_move,
             filter_keys=self._build_shortcut_filter(),
             target_hwnd=target_hwnd)
-        # Save groups on EVERY captured event so unexpected app close / power
-        # loss / kill / AV / update cannot wipe in-progress recording.  Atomic
-        # write inside save_groups means partial writes can't corrupt the file
-        # either — the user has lost too many recording sessions.
+        # Captured events: append in-memory immediately (zero-latency),
+        # then schedule a background disk write.  Doing a full save_groups()
+        # on the GUI thread for every keystroke/mouse-move was blocking the
+        # UI for tens of milliseconds per event — causing the tab-switch freeze.
+        # The 5-second safety-save timer handles persistence; the debounce here
+        # adds an extra 2-second write so we lose at most ~2s on a hard crash.
+        self._rec_save_timer = getattr(self, "_rec_save_timer", None)
+        if self._rec_save_timer is None:
+            self._rec_save_timer = QTimer(self)
+            self._rec_save_timer.setSingleShot(True)
+            self._rec_save_timer.setInterval(2000)
+            def _bg_save():
+                groups_snap = self._groups[:]   # shallow copy for thread safety
+                def _do():
+                    try: self._storage.save_groups(groups_snap)
+                    except Exception as e: print(f"[rec-autosave] {e}")
+                threading.Thread(target=_do, daemon=True).start()
+            self._rec_save_timer.timeout.connect(_bg_save)
         def _capture(ev, lw_=lw):
             lw_.add_event(ev)
-            try: self._storage.save_groups(self._groups)
-            except Exception as e: print(f"[autosave-rec] {e}")
+            # Kick the 2-second debounce — resets on every event so we write
+            # ~2s after the last captured event, not on every single one.
+            self._rec_save_timer.start()
         rec.captured.connect(_capture)
         rec.done.connect(lambda mid=macro_id: self._on_rec_done(mid))
         self._recorders[macro_id] = rec
@@ -6248,6 +6303,10 @@ class MainWindow(QMainWindow):
     def _on_rec_done(self, macro_id: str):
         self._recorders.pop(macro_id, None)
         self._flash_timer.stop()
+        # Stop debounce save timer and do a final save synchronously now that
+        # recording is over (GUI idle, no more rapid events coming in).
+        if hasattr(self, "_rec_save_timer"):
+            self._rec_save_timer.stop()
         lw = self._find_lane_widget(macro_id)
         if lw:
             lw.set_recording(False)
