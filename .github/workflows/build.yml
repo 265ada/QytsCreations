@@ -71,29 +71,22 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"notes={notes}\n")
 
-      - name: Rename exe with version
-        shell: pwsh
-        run: |
-          $v = "${{ steps.version.outputs.version }}"
-          Copy-Item "dist\QytCroRec.exe" "dist\QytCroRec_v$v.exe"
-          # Also place in repo dist folder (tracked)
-          New-Item -ItemType Directory -Force "..\QytsCreations\dist" | Out-Null
-          Copy-Item "dist\QytCroRec_v$v.exe" "..\QytsCreations\dist\QytCroRec_v$v.exe" -ErrorAction SilentlyContinue
-
-      - name: Commit versioned exe back to repo
+      - name: Purge any tracked versioned exes from repo dist
         shell: pwsh
         working-directory: ${{ github.workspace }}
         run: |
-          $v = "${{ steps.version.outputs.version }}"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Remove old versioned exes, keep only latest
-          Get-ChildItem "QytsCreations\dist\QytCroRec_v*.exe" -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ne "QytCroRec_v$v.exe" } |
-            ForEach-Object { git rm --cached $_.FullName.Replace($PWD+"\","") 2>$null; Remove-Item $_ -Force }
-          git add "QytsCreations/dist/QytCroRec_v$v.exe"
-          git diff --cached --quiet || git commit -m "ci: add QytCroRec_v$v.exe to dist [skip ci]"
-          git push
+          $changed = $false
+          Get-ChildItem "QytsCreations\dist\QytCroRec_v*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
+            git rm -f --cached $_.FullName.Replace($PWD.Path + "\","").Replace("\","/") 2>$null
+            Remove-Item $_ -Force -ErrorAction SilentlyContinue
+            $changed = $true
+          }
+          if ($changed) {
+            git commit -m "ci: remove versioned exe copies — single QytCroRec.exe only [skip ci]"
+            git push
+          }
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -103,5 +96,4 @@ jobs:
           body: ${{ steps.notes.outputs.notes }}
           files: |
             QytsCreations/dist/QytCroRec.exe
-            QytsCreations/dist/QytCroRec_v${{ steps.version.outputs.version }}.exe
           make_latest: true

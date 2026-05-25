@@ -1,4 +1,4 @@
 {
-  "version": "1.37",
-  "notes": "v1.37: Auto-update hardened against corrupted/AV-quarantined downloads. Streams to .partial file, verifies size match + MZ exe magic before swap. Keeps backup of current exe. Batch waits 3s for AV scan post-move, then verifies new exe stays alive 5s after launch — if it crashed (python311.dll missing etc.) auto-rolls back from backup. Diagnostic _qyt_update.log next to exe."
+  "version": "1.38",
+  "notes": "v1.38: CI publishes ONLY QytCroRec.exe — versioned QytCroRec_v*.exe copies removed from releases and from repo dist folder. Cleaner downloads, no confusion about which file to grab."
 }
