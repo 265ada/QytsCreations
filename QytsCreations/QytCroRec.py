@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.38"
+__version__ = "1.39"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -4487,17 +4487,49 @@ class MainWindow(QMainWindow):
         gm_hdr = QLabel("GUARD MACROS")
         gm_hdr.setStyleSheet("color:#585b70;font-size:10px;font-weight:bold;padding:6px 0 2px 0;")
         lay.addWidget(gm_hdr)
-        gm_btns = QHBoxLayout(); gm_btns.setSpacing(3)
-        btn_gm_new  = QPushButton("+ New");   btn_gm_new.setMaximumHeight(22)
-        btn_gm_del  = QPushButton("✕ Del");   btn_gm_del.setMaximumHeight(22)
-        btn_gm_rec  = QPushButton("● Rec");   btn_gm_rec.setMaximumHeight(22)
-        btn_gm_stop = QPushButton("⏹ Stop");  btn_gm_stop.setMaximumHeight(22)
+        gm_btns = QHBoxLayout(); gm_btns.setSpacing(4)
+        # Icon-only buttons with vivid color per function + descriptive tooltips
+        btn_gm_new  = QPushButton("➕")
+        btn_gm_new.setToolTip("New Guard Macro — create a blank correction macro")
+        btn_gm_new.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #58d68d,stop:1 #28a360);color:#ffffff;border:2px solid #80e3a5;"
+            "border-radius:6px;font-size:16px;font-weight:bold;padding:2px;}"
+            "QPushButton:hover{background:#3ec07a;border-color:#a6f0c2;}"
+            "QPushButton:pressed{background:#1e7b46;}")
+        btn_gm_del  = QPushButton("🗑")
+        btn_gm_del.setToolTip("Delete Guard Macro — remove the selected guard macro")
+        btn_gm_del.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #ff5a5a,stop:1 #c81e1e);color:#ffffff;border:2px solid #ff8080;"
+            "border-radius:6px;font-size:16px;font-weight:bold;padding:2px;}"
+            "QPushButton:hover{background:#ee3030;border-color:#ffa0a0;}"
+            "QPushButton:pressed{background:#880000;}")
+        btn_gm_rec  = QPushButton("⏺")
+        btn_gm_rec.setToolTip("Record Guard Macro — capture events into the selected guard macro")
+        btn_gm_rec.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #ff8aa0,stop:1 #d63060);color:#ffffff;border:2px solid #ffb0c0;"
+            "border-radius:6px;font-size:16px;font-weight:bold;padding:2px;}"
+            "QPushButton:hover{background:#ee5078;border-color:#ffc8d8;}"
+            "QPushButton:pressed{background:#9a1f44;}")
+        btn_gm_stop = QPushButton("⏹")
+        btn_gm_stop.setToolTip("Stop Recording — end the current guard macro capture")
+        btn_gm_stop.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #4ab8ff,stop:1 #1c70c0);color:#ffffff;border:2px solid #80d0ff;"
+            "border-radius:6px;font-size:16px;font-weight:bold;padding:2px;}"
+            "QPushButton:hover{background:#2a90e0;border-color:#a0e0ff;}"
+            "QPushButton:pressed{background:#0c4880;}")
         btn_gm_new .clicked.connect(self._guard_macro_new)
         btn_gm_del .clicked.connect(self._guard_macro_delete)
         btn_gm_rec .clicked.connect(self._guard_macro_record)
         btn_gm_stop.clicked.connect(self._guard_macro_stop)
         for b in (btn_gm_new, btn_gm_del, btn_gm_rec, btn_gm_stop):
-            gm_btns.addWidget(b)
+            b.setFixedHeight(30)
+            b.setMinimumWidth(0)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            gm_btns.addWidget(b, 1)
         lay.addLayout(gm_btns)
         self._guard_macro_list = QListWidget()
         self._guard_macro_list.setMaximumHeight(120)

@@ -1,4 +1,4 @@
 {
-  "version": "1.38",
-  "notes": "v1.38: CI publishes ONLY QytCroRec.exe — versioned QytCroRec_v*.exe copies removed from releases and from repo dist folder. Cleaner downloads, no confusion about which file to grab."
+  "version": "1.39",
+  "notes": "v1.39: Guard Macro buttons redesigned as vivid icon-only chips — green ➕ New, red 🗑 Delete, pink ⏺ Record, blue ⏹ Stop. Each has a descriptive tooltip on hover. Larger 30px height, full-width split, pointing-hand cursor."
 }
