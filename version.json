@@ -1,4 +1,4 @@
 {
-  "version": "1.40",
-  "notes": "v1.40: Guard Macro Record button now yellow gradient with dark text, Stop button now orange gradient with white text. Polished hover states match base gradient. Green New + red Delete unchanged."
+  "version": "1.41",
+  "notes": "v1.41: Update no longer hangs at 100%. Backup copy of running exe moved from Python (synchronous, Defender-scanned, multi-second hang) into the batch swap script (runs after we quit). Download worker thread now ALWAYS emits done_sig in try/finally — no silent hang on exception."
 }

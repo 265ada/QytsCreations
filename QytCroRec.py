@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.40"
+__version__ = "1.41"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2175,25 +2175,18 @@ class AutoUpdater:
             except Exception as e:
                 print(f"Rename .partial failed: {e}")
                 return False
-            # Keep a copy of the CURRENT exe as backup so the batch can roll
-            # back if the new exe fails to launch (Defender, missing DLL etc.)
-            try:
-                if backup_exe.exists(): backup_exe.unlink()
-                import shutil; shutil.copy2(current_exe, backup_exe)
-            except Exception as e:
-                print(f"Backup copy failed (non-fatal): {e}")
-            # ── Robust batch: poll-retry until current exe is releasable ─────
-            # Old version used a fixed 2 s wait — failed on slow machines because
-            # Qt teardown sometimes takes longer; `move` then errored with the
-            # exe still in use, leaving the user on the old version.  Now we
-            # loop `move` up to 60 s, then start the new exe + self-delete.
+            # NOTE: backup of the current exe is done by the batch script
+            # AFTER our process exits — copying a 77 MB running exe from
+            # Python was blocking the GUI for many seconds while Defender
+            # scanned the copy, leaving the progress dialog frozen at 100 %.
             # Batch:
             #   1. Wait for old exe to release file lock (poll move up to 60s).
-            #   2. After successful move, pause 3 s so antivirus / Defender can
-            #      finish scanning the freshly-written exe (Defender briefly
-            #      locks/quarantines unsigned binaries — launching mid-scan
-            #      reproduces "python311.dll not found" from PyInstaller).
-            #   3. Launch new exe.  Test launch — if process exits within 4 s
+            #   2. Copy old exe to backup (fast — we're not running anymore).
+            #      Old version copied from Python BEFORE quit — Defender
+            #      scanned mid-copy, hung the GUI at 100 %.  Now happens here.
+            #   3. After successful move, pause 3 s so antivirus / Defender can
+            #      finish scanning the freshly-written exe.
+            #   4. Launch new exe.  Verify it stays alive 4 s; if it died
             #      (broken DLL / Defender quarantine) → rollback from backup
             #      and relaunch the working old exe.
             batch_path.write_text(
@@ -2207,6 +2200,12 @@ class AutoUpdater:
                 "set /a TRIES=0\r\n"
                 ":retry\r\n"
                 "ping -n 2 127.0.0.1 >nul\r\n"
+                "copy /y %EXE% %BAK% >nul 2>&1\r\n"
+                "if errorlevel 1 (\r\n"
+                "  set /a TRIES+=1\r\n"
+                "  if !TRIES! lss 60 goto retry\r\n"
+                "  echo [%date% %time%] backup copy failed after 60 tries >> %LOG%\r\n"
+                ")\r\n"
                 "move /y %NEW% %EXE% >nul 2>&1\r\n"
                 "if not errorlevel 1 goto av_grace\r\n"
                 "set /a TRIES+=1\r\n"
@@ -4267,13 +4266,21 @@ class MainWindow(QMainWindow):
         self._update_dlg.show()
         # Run download off the GUI thread so UI doesn't freeze
         def _do_download():
-            target = Path(__file__).resolve()
-            def _prog(rec, tot):
-                self._update_progress_sig.emit(rec, tot)
-            ok = upd.download_and_install(target,
-                                          new_version=info["version"],
-                                          progress_cb=_prog)
-            self._update_done_sig.emit(ok)   # signal marshals to GUI thread safely
+            ok = False
+            try:
+                target = Path(__file__).resolve()
+                def _prog(rec, tot):
+                    self._update_progress_sig.emit(rec, tot)
+                ok = upd.download_and_install(target,
+                                              new_version=info["version"],
+                                              progress_cb=_prog)
+            except Exception as e:
+                print(f"[update] worker exception: {e}")
+                _log_crash(f"[update worker] {e}\n{traceback.format_exc()}")
+            finally:
+                # ALWAYS fire — never leave the GUI stuck at 100 %
+                try: self._update_done_sig.emit(bool(ok))
+                except Exception: pass
         threading.Thread(target=_do_download, daemon=True).start()
 
     def _on_update_progress(self, received: int, total: int):
