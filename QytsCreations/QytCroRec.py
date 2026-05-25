@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.34"
+__version__ = "1.35"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -273,9 +273,28 @@ class Storage:
     def __init__(self):
         self.dir = Path.home() / ".macro_recorder"
         self.dir.mkdir(exist_ok=True)
-        self.groups_path    = self.dir / "groups.json"
-        self.macros_path    = self.dir / "macros.json"   # legacy
-        self.shortcuts_path = self.dir / "shortcuts.json"
+        self.groups_path        = self.dir / "groups.json"
+        self.macros_path        = self.dir / "macros.json"   # legacy
+        self.shortcuts_path     = self.dir / "shortcuts.json"
+        self.guard_macros_path  = self.dir / "guard_macros.json"
+
+    # ── Guard Macros (standalone, used by any lane's pixel guard correction) ─
+
+    def save_guard_macros(self, macros: list):
+        self.guard_macros_path.write_text(
+            json.dumps([asdict(m) for m in macros], indent=2), encoding="utf-8")
+
+    def load_guard_macros(self) -> list:
+        if not self.guard_macros_path.exists():
+            return []
+        try:
+            out = []
+            for d in json.loads(self.guard_macros_path.read_text(encoding="utf-8")):
+                out.append(_macro_from_dict(dict(d)))
+            return out
+        except Exception as e:
+            print(f"Guard macros load error: {e}")
+            return []
 
     # ── Groups (new primary format) ───────────────────────────────────────────
 
@@ -3259,9 +3278,17 @@ class LaneWidget(QWidget):
         combo.addItem("(none — use key)", "")
         cur_id = getattr(self._macro, "pixel_guard_correction_macro", "")
         sel = 0
+        # Discover which macros are guard-list macros (separate top-level pool)
+        guard_ids = set()
+        mw = self.window()
+        try:
+            for gm in getattr(mw, "_guard_macros", []):
+                guard_ids.add(gm.id)
+        except Exception: pass
         for i, mac in enumerate(self._all_macros(), start=1):
             if mac.id == self._macro.id: continue
-            combo.addItem(mac.name, mac.id)
+            tag = "🛡 " if mac.id in guard_ids else ""
+            combo.addItem(f"{tag}{mac.name}", mac.id)
             if mac.id == cur_id: sel = i
         combo.setCurrentIndex(sel); combo.blockSignals(False)
 
@@ -3971,6 +3998,7 @@ class MainWindow(QMainWindow):
 
         self._storage      = Storage()
         self._groups: list[MacroGroup]            = self._storage.load_groups()
+        self._guard_macros: list[Macro]           = self._storage.load_guard_macros()
         self._sc_config: dict[str, str]           = self._storage.load_shortcuts()
         self._cur_group: Optional[MacroGroup]     = None
         self._lane_widgets: list[LaneWidget]      = []   # [primary, sec1, sec2]
@@ -4024,6 +4052,9 @@ class MainWindow(QMainWindow):
         out = []
         for g in self._groups:
             out.extend(g.lanes)
+        # Include standalone Guard Macros so the pixel-guard correction
+        # dropdown can pick them and the ChainPlayer can resolve them by id.
+        out.extend(getattr(self, "_guard_macros", []))
         return out
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -4382,6 +4413,35 @@ class MainWindow(QMainWindow):
         gpl.addLayout(users_row)
 
         lay.addWidget(gp_box)
+
+        # ── Guard Macros (standalone, NOT lane macros) ────────────────────────
+        gm_hdr = QLabel("GUARD MACROS")
+        gm_hdr.setStyleSheet("color:#585b70;font-size:10px;font-weight:bold;padding:6px 0 2px 0;")
+        lay.addWidget(gm_hdr)
+        gm_btns = QHBoxLayout(); gm_btns.setSpacing(3)
+        btn_gm_new  = QPushButton("+ New");   btn_gm_new.setMaximumHeight(22)
+        btn_gm_del  = QPushButton("✕ Del");   btn_gm_del.setMaximumHeight(22)
+        btn_gm_rec  = QPushButton("● Rec");   btn_gm_rec.setMaximumHeight(22)
+        btn_gm_stop = QPushButton("⏹ Stop");  btn_gm_stop.setMaximumHeight(22)
+        btn_gm_new .clicked.connect(self._guard_macro_new)
+        btn_gm_del .clicked.connect(self._guard_macro_delete)
+        btn_gm_rec .clicked.connect(self._guard_macro_record)
+        btn_gm_stop.clicked.connect(self._guard_macro_stop)
+        for b in (btn_gm_new, btn_gm_del, btn_gm_rec, btn_gm_stop):
+            gm_btns.addWidget(b)
+        lay.addLayout(gm_btns)
+        self._guard_macro_list = QListWidget()
+        self._guard_macro_list.setMaximumHeight(120)
+        self._guard_macro_list.setStyleSheet(
+            "QListWidget { background:#181825; border:1px solid #313244; "
+            "border-radius:5px; }")
+        self._guard_macro_list.itemDoubleClicked.connect(self._guard_macro_rename)
+        self._guard_macro_list.itemChanged.connect(self._guard_macro_renamed)
+        lay.addWidget(self._guard_macro_list)
+        self._gm_status = QLabel("")
+        self._gm_status.setStyleSheet("color:#7a7d99;font-size:10px;")
+        lay.addWidget(self._gm_status)
+        self._refresh_guard_macro_list()
         return w
 
     def _build_center(self) -> QWidget:
@@ -5125,6 +5185,104 @@ class MainWindow(QMainWindow):
         if self._guard_use_chk_t.isChecked(): mask |= 0b100
         self._cur_group.shared_guard_users = mask
         self._storage.save_groups(self._groups)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # GUARD MACROS (standalone correction macros, used by pixel-guard)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _refresh_guard_macro_list(self):
+        lst = self._guard_macro_list
+        lst.blockSignals(True)
+        lst.clear()
+        for gm in self._guard_macros:
+            it = QListWidgetItem(f"{gm.name}  ({len(gm.events)} ev)")
+            it.setData(Qt.ItemDataRole.UserRole, gm.id)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
+            lst.addItem(it)
+        lst.blockSignals(False)
+        # Refresh every lane's guard-macro dropdown so newly added entries appear
+        for lw in self._lane_widgets:
+            try: lw.refresh_guard_combo()
+            except Exception: pass
+
+    def _selected_guard_macro(self) -> Optional["Macro"]:
+        it = self._guard_macro_list.currentItem()
+        if not it: return None
+        gid = it.data(Qt.ItemDataRole.UserRole)
+        return next((m for m in self._guard_macros if m.id == gid), None)
+
+    def _guard_macro_new(self):
+        n = len(self._guard_macros) + 1
+        m = Macro(name=f"Guard {n}")
+        self._guard_macros.append(m)
+        self._storage.save_guard_macros(self._guard_macros)
+        self._refresh_guard_macro_list()
+        self._guard_macro_list.setCurrentRow(len(self._guard_macros) - 1)
+
+    def _guard_macro_delete(self):
+        gm = self._selected_guard_macro()
+        if not gm: return
+        if QMessageBox.question(self, "Delete Guard Macro",
+                f"Delete '{gm.name}'?  Lanes pointing at it will fall back to key press."
+                ) != QMessageBox.StandardButton.Yes:
+            return
+        self._guard_macros = [m for m in self._guard_macros if m.id != gm.id]
+        self._storage.save_guard_macros(self._guard_macros)
+        self._refresh_guard_macro_list()
+
+    def _guard_macro_record(self):
+        gm = self._selected_guard_macro()
+        if not gm:
+            self._gm_status.setText("Pick a guard macro first."); return
+        # Stop any lane recorders so we don't double-capture
+        for mid in list(self._recorders.keys()):
+            self._stop_recording(mid)
+        # Clear the guard macro's events and start a fresh recording
+        gm.events = []
+        rec = RecorderThread(
+            record_mouse_move=False,
+            filter_keys=self._build_shortcut_filter(),
+            target_hwnd=None)
+        def _capture(ev, gm_=gm):
+            gm_.events.append(ev)
+            self._gm_status.setText(f"● REC '{gm_.name}' — {len(gm_.events)} ev")
+        rec.captured.connect(_capture)
+        rec.done.connect(lambda mid=gm.id: self._guard_macro_rec_done(mid))
+        self._recorders[gm.id] = rec
+        self._recording_lane = gm.id
+        sound_record_start()
+        self._gm_status.setText(f"● REC '{gm.name}'")
+        rec.begin()
+
+    def _guard_macro_stop(self):
+        gm = self._selected_guard_macro()
+        if gm and gm.id in self._recorders:
+            self._stop_recording(gm.id)
+
+    def _guard_macro_rec_done(self, mid: str):
+        self._recorders.pop(mid, None)
+        gm = next((m for m in self._guard_macros if m.id == mid), None)
+        if gm:
+            self._gm_status.setText(f"Saved '{gm.name}' — {len(gm.events)} ev")
+        sound_record_stop()
+        self._storage.save_guard_macros(self._guard_macros)
+        self._refresh_guard_macro_list()
+        self._recording_lane = None
+
+    def _guard_macro_rename(self, item: QListWidgetItem):
+        self._guard_macro_list.editItem(item)
+
+    def _guard_macro_renamed(self, item: QListWidgetItem):
+        gid = item.data(Qt.ItemDataRole.UserRole)
+        gm = next((m for m in self._guard_macros if m.id == gid), None)
+        if not gm: return
+        # Item text now includes "  (N ev)" suffix — strip it
+        new = item.text().split("  (")[0].strip() or gm.name
+        if new != gm.name:
+            gm.name = new
+            self._storage.save_guard_macros(self._guard_macros)
+            # Reset the displayed text to canonical "name  (N ev)"
+            self._refresh_guard_macro_list()
 
     def _on_lane_changed(self):
         self._storage.save_groups(self._groups)
