@@ -6949,15 +6949,30 @@ class MainWindow(QMainWindow):
             QSystemTrayIcon.MessageIcon.Information, 2500)
 
     def _quit_app(self):
-        self._stop_all()
+        # Belt + braces: schedule a hard exit from a daemon timer NOW so even
+        # if every step below deadlocks (storage locked, hotkey unhook hung,
+        # faulthandler refusing to close, etc.) the process still dies in 2 s.
+        try:
+            threading.Timer(2.0, lambda: os._exit(0)).start()
+        except Exception: pass
+
+        # Wrap every cleanup step so one hang can't stall the next.
+        try: self._stop_all()
+        except Exception: pass
         deadline = time.perf_counter() + 1.5
         while self._chain_players and time.perf_counter() < deadline:
             time.sleep(0.05)
-        self._hotkeys.stop(); self._app_hotkeys.stop()
-        self._storage.save_groups(self._groups)
-        try:
-            faulthandler.disable(); _crash_fp.close()
+        try: self._hotkeys.stop()
         except Exception: pass
+        try: self._app_hotkeys.stop()
+        except Exception: pass
+        try: self._storage.save_groups(self._groups)
+        except Exception: pass
+        try: faulthandler.disable()
+        except Exception: pass
+        try: _crash_fp.close()
+        except Exception: pass
+
         # os._exit(0) bypasses the PyInstaller onefile bootloader cleanup
         # which tries (and fails) to delete _MEI* temp dir on Windows,
         # showing an annoying "Failed to remove temporary directory" dialog.
@@ -6998,10 +7013,46 @@ class MainWindow(QMainWindow):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    # ── ZOMBIE GUARDS ────────────────────────────────────────────────────────
+    # Multiple safety nets so the process can NEVER stick around in Task Mgr
+    # after the window closes, the user picks "Quit", we crash, or anything
+    # gets stuck.  Belt + braces because Qt + tray + faulthandler + threads
+    # have repeatedly found ways to keep us alive.
+
+    # 1. Unhandled exception in main thread → log + hard kill.
+    def _excepthook(exc_type, exc_value, exc_tb):
+        try:
+            _log_crash(f"UNCAUGHT {exc_type.__name__}: {exc_value}\n"
+                       f"{''.join(traceback.format_tb(exc_tb))}")
+        except Exception: pass
+        os._exit(1)
+    sys.excepthook = _excepthook
+
+    # 2. Unhandled exception in a thread (Py3.8+) → also kill.
+    try:
+        def _thread_excepthook(args):
+            try:
+                _log_crash(f"THREAD {args.exc_type.__name__}: {args.exc_value}")
+            except Exception: pass
+            os._exit(1)
+        threading.excepthook = _thread_excepthook
+    except Exception: pass
+
+    # 3. atexit → guaranteed kill after Python tears down.  os._exit skips
+    #    cleanup but at this point Qt + threads are already gone.
+    import atexit
+    atexit.register(lambda: os._exit(0))
+
     app = QApplication(sys.argv)
     app.setApplicationName("QytCroRec")
     app.setApplicationDisplayName("QytCroRec")
     app.setQuitOnLastWindowClosed(False)
+
+    # 4. Any path to QApplication.quit() (incl. tray Quit, OS shutdown signal,
+    #    last-window-closed override) schedules a hard exit 1.5 s later.
+    app.aboutToQuit.connect(
+        lambda: threading.Timer(1.5, lambda: os._exit(0)).start())
+
     # Set app-wide icon BEFORE the window is shown so taskbar + alt-tab pick it
     # up on first paint instead of flashing the generic Python icon.
     app.setWindowIcon(_app_icon())
@@ -7012,7 +7063,10 @@ def main():
     except Exception: pass
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    rc = app.exec()
+    # If exec returned (Qt loop ended) and we somehow got here, kill the
+    # process immediately rather than hoping atexit fires cleanly.
+    os._exit(rc)
 
 
 if __name__ == "__main__":

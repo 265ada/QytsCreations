@@ -71,6 +71,16 @@ static HWND g_target_window = NULL;
 static HANDLE g_pipe_handle = INVALID_HANDLE_VALUE;
 static HANDLE g_pipe_thread = NULL;
 
+// ─── Watchdog ───────────────────────────────────────────────────────────
+// Tracks the PID of whichever process last connected to our named pipe.
+// When that process dies (e.g. macro_recorder.py crashes / Task Mgr kills
+// it) the watchdog thread self-unloads this DLL so the game's input APIs
+// return to vanilla without the user having to restart the game.
+static HMODULE g_self_module    = NULL;
+static HANDLE  g_watchdog_thread = NULL;
+static volatile DWORD g_last_client_pid = 0;
+static volatile DWORD g_client_died_at  = 0;   // GetTickCount when we first saw it dead
+
 struct FindWindowCtx { DWORD pid; HWND hwnd; };
 static BOOL CALLBACK FindWindowEnumProc(HWND h, LPARAM lp) {
     FindWindowCtx* ctx = (FindWindowCtx*)lp;
@@ -616,6 +626,14 @@ static DWORD WINAPI PipeThread(LPVOID) {
             Sleep(50);
             continue;
         }
+        // Record the client's PID so the watchdog can detect if it dies
+        // without disconnecting cleanly (crash / TaskMgr kill).
+        ULONG clientPid = 0;
+        if (GetNamedPipeClientProcessId(h, &clientPid)) {
+            g_last_client_pid = (DWORD)clientPid;
+            g_client_died_at  = 0;          // reset death-clock on fresh connect
+            LogF("client connected pid=%lu", g_last_client_pid);
+        }
         // Client is connected — read commands until they disconnect.
         char buf[256]; DWORD got = 0;
         std::string line;
@@ -637,9 +655,56 @@ static DWORD WINAPI PipeThread(LPVOID) {
     return 0;
 }
 
+// ─── Watchdog: self-unload if the macro recorder dies ──────────────────
+// Polls g_last_client_pid every second.  Once the process matching that
+// PID has exited and stayed exited for >=5 s, we call
+// FreeLibraryAndExitThread on ourselves — DLL_PROCESS_DETACH runs, all
+// Detours are reverted, and the DLL leaves the game's address space.
+// Game input APIs go back to vanilla; no game restart needed.
+static DWORD WINAPI WatchdogThread(LPVOID) {
+    const DWORD GRACE_MS = 5000;
+    while (g_running) {
+        Sleep(1000);
+        DWORD pid = g_last_client_pid;
+        if (!pid) continue;                           // no client ever connected
+        HANDLE hp = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                                FALSE, pid);
+        bool alive = false;
+        if (hp) {
+            DWORD ec = STILL_ACTIVE;
+            if (GetExitCodeProcess(hp, &ec) && ec == STILL_ACTIVE)
+                alive = (WaitForSingleObject(hp, 0) == WAIT_TIMEOUT);
+            CloseHandle(hp);
+        }
+        if (alive) { g_client_died_at = 0; continue; }
+        // Client process not running.
+        DWORD now = GetTickCount();
+        if (g_client_died_at == 0) {
+            g_client_died_at = now;
+            LogF("watchdog: client pid=%lu gone, grace=%lums", pid, (unsigned long)GRACE_MS);
+            continue;
+        }
+        if (now - g_client_died_at < GRACE_MS) continue;
+        LogF("watchdog: self-unloading (client pid=%lu dead for %lums)",
+             pid, (unsigned long)(now - g_client_died_at));
+        // Wake the pipe thread out of ConnectNamedPipe so it can exit
+        // before DLL_PROCESS_DETACH waits on it.
+        g_running = false;
+        HANDLE p = (HANDLE)InterlockedExchangePointer(
+            (PVOID*)&g_pipe_handle, (PVOID)INVALID_HANDLE_VALUE);
+        if (p != INVALID_HANDLE_VALUE) CloseHandle(p);
+        // FreeLibraryAndExitThread triggers DLL_PROCESS_DETACH → the cleanup
+        // path below (DetourDetach + thread join) runs → DLL is unloaded
+        // from the game process.  This thread does not return.
+        FreeLibraryAndExitThread(g_self_module, 0);
+    }
+    return 0;
+}
+
 // ─── DLL entry ──────────────────────────────────────────────────────────
 BOOL APIENTRY DllMain(HMODULE hMod, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
+        g_self_module = hMod;
         DisableThreadLibraryCalls(hMod);
 
         OpenLog();
@@ -663,6 +728,8 @@ BOOL APIENTRY DllMain(HMODULE hMod, DWORD reason, LPVOID) {
         // Start the named-pipe command server.  Keep the thread handle so
         // we can wait for it to exit on detach.
         g_pipe_thread = CreateThread(NULL, 0, PipeThread, NULL, 0, NULL);
+        // Start the watchdog (self-unload when the macro recorder dies).
+        g_watchdog_thread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, NULL);
     } else if (reason == DLL_PROCESS_DETACH) {
         // ── Clean shutdown to avoid crashes on FreeLibrary ──
         // 1. Tell the pipe thread to stop.
@@ -681,6 +748,16 @@ BOOL APIENTRY DllMain(HMODULE hMod, DWORD reason, LPVOID) {
             WaitForSingleObject(g_pipe_thread, 500);
             CloseHandle(g_pipe_thread);
             g_pipe_thread = NULL;
+        }
+        // 3b. If the watchdog itself triggered this detach, we ARE the
+        // watchdog thread (FreeLibraryAndExitThread re-entered DllMain).
+        // Don't try to wait on ourselves.  Otherwise, signal + join.
+        if (g_watchdog_thread &&
+            GetThreadId(g_watchdog_thread) != GetCurrentThreadId())
+        {
+            WaitForSingleObject(g_watchdog_thread, 200);
+            CloseHandle(g_watchdog_thread);
+            g_watchdog_thread = NULL;
         }
 
         // 4. Restore the original function bytes (un-hook everything).

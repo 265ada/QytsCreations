@@ -1,5 +1,5 @@
 {
     "version":  "1.68",
-    "sha256":  "f29a076ee277f99510443f01e2fcc2cf530fd0f167722e383635a20944c0fa40",
-    "notes":  "v1.68: SHA256 integrity verification for auto-updater. Refuses to install a downloaded exe whose hash doesn\u0027t match the value in version.json -- defends against a poisoned release binary even if TLS or the GitHub channel is compromised. version.json now ships a \u0027sha256\u0027 field with every release."
+    "sha256":  "fc23f4c6f70bd9edae87e480bc5173522a0f3a78c7b0f5af6ed7097f69bc4875",
+    "notes":  "v1.68: SHA256 integrity check for auto-updater + zombie-process guards (atexit + aboutToQuit timer + sys.excepthook hard-exit) so QytCroRec.exe never stays in Task Mgr after close or crash. Bundled new hook DLL with self-unload watchdog -- if QytCroRec dies while a game has the hook injected, the DLL detects the dead owner within 5s and unhooks itself (game input back to vanilla, no game restart needed)."
 }
