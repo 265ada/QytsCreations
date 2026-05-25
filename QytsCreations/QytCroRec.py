@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.35"
+__version__ = "1.36"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -4044,6 +4044,8 @@ class MainWindow(QMainWindow):
 
         # Always start the update thread — the thread checks the pref internally
         threading.Thread(target=self._check_for_updates, daemon=True).start()
+        # Initial render of run-counts strip (shows totals carried over from disk)
+        self._refresh_runs_label()
 
     def _autosave_fn(self):
         self._storage.save_groups(self._groups)
@@ -4485,7 +4487,38 @@ class MainWindow(QMainWindow):
             "QTextEdit{background:#181825;border:1px solid #313244;border-radius:4px;"
             "font-family:Consolas,monospace;font-size:11px;color:#a6adc8;padding:4px;}")
         lay.addWidget(self._log)
+        # ── Run-count summary strip (only non-zero lanes shown) ───────────────
+        self._runs_lbl = QLabel("")
+        self._runs_lbl.setStyleSheet(
+            "color:#a6e3a1; font-family:Consolas,monospace; font-size:11px; "
+            "padding:3px 6px; background:#11111b; border:1px solid #313244; "
+            "border-radius:4px;")
+        self._runs_lbl.setWordWrap(True)
+        lay.addWidget(self._runs_lbl)
         return w
+
+    def _refresh_runs_label(self):
+        """Show per-lane run totals across all groups — only non-zero entries."""
+        if not hasattr(self, "_runs_lbl"): return
+        names = ["Primary", "Secondary", "Third"]
+        parts = []
+        for g in self._groups:
+            seg = []
+            for i, lane in enumerate(g.lanes[:3]):
+                rc = getattr(lane, "run_count", 0)
+                if rc > 0:
+                    seg.append(f"{names[i]}={rc}")
+            if seg:
+                parts.append(f"[{g.name}] " + "  ".join(seg))
+        # Also include guard macros that have run
+        gmseg = []
+        for gm in getattr(self, "_guard_macros", []):
+            rc = getattr(gm, "run_count", 0)
+            if rc > 0:
+                gmseg.append(f"{gm.name}={rc}")
+        if gmseg:
+            parts.append("[Guard] " + "  ".join(gmseg))
+        self._runs_lbl.setText("Runs:  " + "    ".join(parts) if parts else "Runs:  (none yet)")
 
     # ── Tab: Macro settings ───────────────────────────────────────────────────
 
@@ -5577,6 +5610,14 @@ class MainWindow(QMainWindow):
     def _on_lane_stopped_sig(self, gid: str, lane_idx: int, mid: str):
         lw = self._find_lane_widget(mid)
         if lw: lw.set_playing(False)
+        # Increment the lane's lifetime run counter — every completed (or
+        # stopped-early) rep counts as one run.
+        for g in self._groups:
+            if g.id != gid: continue
+            if 0 <= lane_idx < len(g.lanes):
+                g.lanes[lane_idx].run_count = (g.lanes[lane_idx].run_count or 0) + 1
+            break
+        self._refresh_runs_label()
 
     def _on_chain_stopped(self, gid: str):
         self._chain_players.pop(gid, None)
@@ -5601,6 +5642,7 @@ class MainWindow(QMainWindow):
         self._set_status("Chain complete.", "#a6adc8")
         sound_play_stop(); speak("done")
         self._storage.save_groups(self._groups)
+        self._refresh_runs_label()
 
     def _on_chain_progress(self, gid: str, lane_idx: int, idx: int, total: int):
         if self._cur_group and self._cur_group.id == gid:

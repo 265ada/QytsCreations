@@ -1,4 +1,4 @@
 {
-  "version": "1.35",
-  "notes": "v1.35: Standalone GUARD MACROS list — separate from lane macros. New/Delete/Record/Stop buttons under left sidebar. Saved to guard_macros.json. Selectable in every lane's pixel-guard correction dropdown (prefixed with 🛡). Recording captures to the guard macro's own events, never shared with Primary/Secondary/Third."
+  "version": "1.36",
+  "notes": "v1.36: Run-count summary strip below Activity Log — shows per-lane totals (Primary/Secondary/Third) per group, plus Guard macros. Only non-zero entries displayed. Increments each rep, persists across app restarts."
 }
