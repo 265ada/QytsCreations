@@ -56,6 +56,26 @@ _hook_files = [
 ]
 _hook_datas = [(src, dst) for src, dst in _hook_files if Path(src).exists()]
 
+# ── Generate multi-size app icon from PNG ────────────────────────────────────
+# If assets/rage_icon.png exists, build a Windows multi-resolution .ico from
+# it (16/24/32/48/64/128/256) so taskbar + alt-tab + exe-thumb + tray all look
+# crisp at any DPI.  Skipped silently if PNG missing.
+_icon_path = None
+_png_src = Path(SPECPATH) / 'assets' / 'rage_icon.png'
+_ico_out = Path(SPECPATH) / 'assets' / 'rage_icon.ico'
+if _png_src.exists():
+    try:
+        from PIL import Image as _PI
+        _src = _PI.open(_png_src).convert('RGBA')
+        _sizes = [(s, s) for s in (16, 24, 32, 48, 64, 128, 256)]
+        _src.save(_ico_out, format='ICO', sizes=_sizes)
+        _icon_path = str(_ico_out)
+        print(f"[spec] Generated app icon: {_ico_out}")
+    except Exception as _e:
+        print(f"[spec] WARNING: icon gen failed ({_e}); building without icon")
+else:
+    print(f"[spec] No assets/rage_icon.png — exe will use default icon")
+
 # ── Bundle assets folder (backgrounds, icons, etc.) ──────────────────────────
 _assets_datas = []
 _assets_dir = Path(SPECPATH) / 'assets'
@@ -109,4 +129,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=_icon_path,   # Windows exe icon — embedded into the PE resource table
 )

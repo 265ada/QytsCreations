@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.41"
+__version__ = "1.42"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2278,6 +2278,25 @@ def _resolve_asset(name: str) -> str:
         base = Path(__file__).parent
     return str(base / "assets" / name)
 
+def _app_icon() -> "QIcon":
+    """Return the RAGE app icon, falling back to a programmatic 'Q' badge."""
+    # Prefer the .ico (multi-resolution, sharper at small sizes)
+    for asset in ("rage_icon.ico", "rage_icon.png"):
+        p = _resolve_asset(asset)
+        if Path(p).exists():
+            ic = QIcon(p)
+            if not ic.isNull():
+                return ic
+    # Programmatic fallback — same look as the old tray placeholder
+    px = QPixmap(64, 64); px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor("#ff8420")); p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(2, 2, 60, 60)
+    p.setPen(QColor("#1e1e2e")); p.setFont(QFont("Segoe UI", 28, QFont.Weight.Bold))
+    p.drawText(QRect(0, 0, 64, 64), Qt.AlignmentFlag.AlignCenter, "Q"); p.end()
+    return QIcon(px)
+
 
 class _BgWidget(QWidget):
     """Central widget that paints the Marvel background image + dark overlay."""
@@ -4059,6 +4078,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"QytCroRec v{__version__}")
+        self.setWindowIcon(_app_icon())
         self.resize(1200, 750)
         self.setMinimumSize(900, 560)
 
@@ -5447,14 +5467,7 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════════════════
 
     def _setup_tray(self):
-        px = QPixmap(32, 32); px.fill(QColor("#1e1e2e"))
-        p = QPainter(px)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(QColor("#89b4fa")); p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(4, 4, 24, 24)
-        p.setPen(QColor("#1e1e2e")); p.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        p.drawText(QRect(0, 0, 32, 32), Qt.AlignmentFlag.AlignCenter, "Q"); p.end()
-        self._tray = QSystemTrayIcon(QIcon(px), self)
+        self._tray = QSystemTrayIcon(_app_icon(), self)
         menu = QMenu()
         menu.addAction(QAction("Show", self, triggered=self.show))
         menu.addSeparator()
@@ -5893,7 +5906,16 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("QytCroRec")
+    app.setApplicationDisplayName("QytCroRec")
     app.setQuitOnLastWindowClosed(False)
+    # Set app-wide icon BEFORE the window is shown so taskbar + alt-tab pick it
+    # up on first paint instead of flashing the generic Python icon.
+    app.setWindowIcon(_app_icon())
+    # Windows: tell the OS this is its own app (own taskbar group + icon).
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "Qyt.QytCroRec.App.1")
+    except Exception: pass
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

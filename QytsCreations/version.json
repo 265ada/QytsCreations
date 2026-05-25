@@ -1,4 +1,4 @@
 {
-  "version": "1.41",
-  "notes": "v1.41: Update no longer hangs at 100%. Backup copy of running exe moved from Python (synchronous, Defender-scanned, multi-second hang) into the batch swap script (runs after we quit). Download worker thread now ALWAYS emits done_sig in try/finally — no silent hang on exception."
+  "version": "1.42",
+  "notes": "v1.42: New RAGE app icon — circular angry-face logo embedded into the exe. Window title bar, taskbar, alt-tab, system tray, and exe-thumbnail all show it. Spec auto-generates multi-size .ico (16/24/32/48/64/128/256) from assets/rage_icon.png at build time."
 }
