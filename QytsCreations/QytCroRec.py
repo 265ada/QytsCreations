@@ -2395,11 +2395,18 @@ class AutoUpdater:
                 "(goto) 2>nul & del /f /q \"%~f0\"\r\n",
                 encoding="ascii", errors="replace"
             )
-            # CREATE_NO_WINDOW (0x08000000) hides the cmd console.  User
-            # previously saw a flashing cmd prompt looping `ping 127.0.0.1`
-            # forever when the broken exe failed every relaunch.  Now silent.
+            # Launch the batch via PowerShell -WindowStyle Hidden so that even
+            # on Windows 11 with Windows Terminal as the default console host,
+            # no visible window is shown.  CREATE_NO_WINDOW alone doesn't
+            # suppress Windows Terminal tabs on Win11.
+            ps_cmd = (
+                f'Start-Process -FilePath "cmd.exe" '
+                f'-ArgumentList \'/c "{batch_path}"\' '
+                f'-WindowStyle Hidden'
+            )
             subprocess.Popen(
-                ["cmd", "/c", str(batch_path)],
+                ["powershell.exe", "-NoProfile", "-NonInteractive",
+                 "-WindowStyle", "Hidden", "-Command", ps_cmd],
                 creationflags=(subprocess.DETACHED_PROCESS
                                | subprocess.CREATE_NEW_PROCESS_GROUP
                                | 0x08000000),   # CREATE_NO_WINDOW
