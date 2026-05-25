@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.64"
+__version__ = "1.65"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -162,6 +162,11 @@ class Macro:
     target_window_title: str   = ""
     target_window_2:     str   = ""
     target_window_3:     str   = ""
+    # Which Nth match of the title substring to bind to (0 = 1st match).
+    # Lets Secondary/Third pin a SPECIFIC window when multiple windows share
+    # the same title (e.g. two game clients).  Survives restart because we
+    # re-resolve by (title, instance) every time.
+    target_window_instance: int = 0
     use_target_window:   bool  = False
     input_backend:       str   = "auto"    # "auto" | "winmsg" | "pynput" | "interception" | "serial_hid"
     created_at:          float = field(default_factory=time.time)
@@ -514,12 +519,10 @@ def get_foreground_title() -> str:
     _u32.GetWindowTextW(hwnd, buf, n + 1)
     return buf.value
 
-def find_window_hwnd(title: str,
-                     skip_hwnds: Optional[set] = None) -> Optional[int]:
-    """Return the first visible window whose title contains *title* (case-
-    insensitive).  Pass skip_hwnds to exclude already-claimed windows — used
-    when multiple lanes target windows with the same title so each lane gets
-    a distinct HWND (e.g. two game accounts with the identical window name)."""
+def find_window_hwnds_all(title: str) -> list:
+    """Return ALL visible window HWNDs whose title contains *title* (case-
+    insensitive).  Order is stable: by (PID asc, HWND asc) so the same window
+    always lands at the same instance index across calls."""
     matches: list = []
     WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.c_long)
     def _cb(hwnd, _):
@@ -527,11 +530,55 @@ def find_window_hwnd(title: str,
             buf = ctypes.create_unicode_buffer(256)
             _u32.GetWindowTextW(hwnd, buf, 256)
             if title.lower() in buf.value.lower() and buf.value:
-                if skip_hwnds is None or hwnd not in skip_hwnds:
-                    matches.append(hwnd)
+                try: pid = get_window_pid(int(hwnd))
+                except Exception: pid = 0
+                matches.append((int(pid), int(hwnd)))
         return True
     _u32.EnumWindows(WNDENUMPROC(_cb), 0)
-    return matches[0] if matches else None
+    matches.sort()   # by (pid, hwnd) — deterministic
+    return [h for _p, h in matches]
+
+def find_window_hwnd(title: str,
+                     skip_hwnds: Optional[set] = None) -> Optional[int]:
+    """Return the first visible window whose title contains *title* (case-
+    insensitive).  Pass skip_hwnds to exclude already-claimed windows."""
+    for h in find_window_hwnds_all(title):
+        if skip_hwnds is None or h not in skip_hwnds:
+            return h
+    return None
+
+def find_window_hwnd_at_instance(title: str, instance: int,
+                                 skip_hwnds: Optional[set] = None) -> Optional[int]:
+    """Return the Nth (0-indexed) visible window whose title contains *title*,
+    skipping any HWNDs in skip_hwnds.  Used so Secondary/Third lanes pin a
+    SPECIFIC window when multiple windows share the same title.  Falls back
+    to the first available match if the exact instance is missing."""
+    all_hwnds = find_window_hwnds_all(title)
+    # Filter skipped
+    if skip_hwnds:
+        avail = [h for h in all_hwnds if h not in skip_hwnds]
+    else:
+        avail = list(all_hwnds)
+    if not avail:
+        return None
+    # Try the exact instance from the FULL list first (preserves pin semantics)
+    if 0 <= instance < len(all_hwnds):
+        cand = all_hwnds[instance]
+        if cand in avail:
+            return cand
+    # Fall back to instance-th of available, then first available
+    if 0 <= instance < len(avail):
+        return avail[instance]
+    return avail[0]
+
+def resolve_lane_hwnd(macro, skip_hwnds: Optional[set] = None) -> Optional[int]:
+    """Resolve a Macro lane's bound window HWND using (title, instance)."""
+    if not (getattr(macro, "use_target_window", False)
+            and getattr(macro, "target_window_title", "")):
+        return None
+    inst = int(getattr(macro, "target_window_instance", 0) or 0)
+    return find_window_hwnd_at_instance(
+        macro.target_window_title, inst, skip_hwnds)
 
 def enumerate_windows() -> list:
     """Return [(hwnd, pid, title), …] for every visible top-level window with a title."""
@@ -1422,8 +1469,7 @@ def create_backend(macro: "Macro",
     def _hwnd_for_macro() -> Optional[int]:
         if hwnd_override:
             return hwnd_override
-        if not (macro.use_target_window and macro.target_window_title): return None
-        return find_window_hwnd(macro.target_window_title)
+        return resolve_lane_hwnd(macro)
 
     def _pid_for_macro() -> Optional[int]:
         h = _hwnd_for_macro()
@@ -1672,9 +1718,7 @@ class PlayerThread(QThread):
             return
         self.mode_sig.emit(m.id, backend.name)
 
-        self._target_hwnd: Optional[int] = None
-        if m.use_target_window and m.target_window_title:
-            self._target_hwnd = find_window_hwnd(m.target_window_title)
+        self._target_hwnd: Optional[int] = resolve_lane_hwnd(m)
 
         events = m.events
         total  = len(events)
@@ -1888,18 +1932,17 @@ class ChainPlayerThread(QThread):
         ]
 
         # ── Pre-resolve one unique HWND per lane (done once, not per rep) ────
-        # find_window_hwnd does substring match; two lanes with the same window
-        # title (e.g. two game accounts) would both get the first match.
-        # Resolve sequentially, skip already-claimed HWNDs so Primary gets
-        # match[0], Secondary gets match[1], Third gets match[2].
+        # Each lane stores a target_window_instance (which Nth match of its
+        # title substring it pinned at pick time).  Resolve sequentially so
+        # later lanes still get a distinct window if two lanes pin the same
+        # instance accidentally.
         _claimed: set  = set()
         _lane_hwnds: dict = {}
         for _li, _ln in active:
-            if _ln.use_target_window and _ln.target_window_title:
-                _h = find_window_hwnd(_ln.target_window_title, _claimed)
-                if _h:
-                    _claimed.add(_h)
-                    _lane_hwnds[_li] = _h
+            _h = resolve_lane_hwnd(_ln, _claimed)
+            if _h:
+                _claimed.add(_h)
+                _lane_hwnds[_li] = _h
 
         # ── Each lane gets its OWN independent rep loop ───────────────────────
         # Lanes start simultaneously but do NOT wait for each other between
@@ -1976,8 +2019,8 @@ class ChainPlayerThread(QThread):
         hwnd = hwnd_override
         pid  = 0
         proc_name = ""
-        if hwnd is None and lane.use_target_window and lane.target_window_title:
-            hwnd = find_window_hwnd(lane.target_window_title)
+        if hwnd is None:
+            hwnd = resolve_lane_hwnd(lane)
         if hwnd:
             pid = get_window_pid(hwnd)
             try:
@@ -2966,7 +3009,7 @@ class LaneWidget(QWidget):
     play_req      = pyqtSignal(str)   # macro id
     stop_req      = pyqtSignal(str)   # macro id
     window_picked = pyqtSignal(str, int, str)  # macro_id, slot, title
-    _drag_result  = pyqtSignal(str)   # picked window title (thread-safe GUI marshal)
+    _drag_result  = pyqtSignal(str, int)   # picked window (title, hwnd) — thread-safe
 
     def __init__(self, macro: Macro, lane_index: int,
                  all_macros_fn,        # callable → list[Macro]
@@ -4044,19 +4087,21 @@ class LaneWidget(QWidget):
         m = self._macro
         if not m.use_target_window or not m.target_window_title:
             self._pid_lbl.setText(""); return
-        # Build skip_hwnds from lanes that come before this one in the group
-        # so Secondary/Third get their own distinct window, not Primary's.
+        # Build skip_hwnds from prior lanes (resolved by their pinned instance)
+        # so a lane that didn't get a unique instance pin still gets a unique
+        # window when the resolver falls back to "first available".
         skip_hwnds: set = set()
         if self._group and self._lane_index > 0:
             for prior_idx in range(self._lane_index):
                 prior = self._group.lanes[prior_idx]
-                if prior.use_target_window and prior.target_window_title:
-                    _h = find_window_hwnd(prior.target_window_title, skip_hwnds)
-                    if _h:
-                        skip_hwnds.add(_h)
-        hwnd = find_window_hwnd(m.target_window_title, skip_hwnds or None)
+                _h = resolve_lane_hwnd(prior, skip_hwnds)
+                if _h:
+                    skip_hwnds.add(_h)
+        hwnd = resolve_lane_hwnd(m, skip_hwnds or None)
         if not hwnd:
-            self._pid_lbl.setText("⚠ Window not found"); return
+            inst = int(getattr(m, "target_window_instance", 0) or 0)
+            tag  = f" (instance #{inst+1})" if inst > 0 else ""
+            self._pid_lbl.setText(f"⚠ Window not found{tag}"); return
         pid = get_window_pid(hwnd)
         try:
             import psutil; pname = psutil.Process(pid).name()
@@ -4064,14 +4109,25 @@ class LaneWidget(QWidget):
         hook_txt = ""
         if m.input_backend == "detours":
             hook_txt = "  Hook: " + ("✓ loaded" if _pipe_exists(pid) else "✗ not loaded")
+        inst = int(getattr(m, "target_window_instance", 0) or 0)
+        inst_tag = f"  #{inst+1}" if inst > 0 else ""
         self._pid_lbl.setText(
-            f"PID {pid}  {pname}  HWND 0x{hwnd:08X}{hook_txt}")
+            f"PID {pid}  {pname}  HWND 0x{hwnd:08X}{inst_tag}{hook_txt}")
 
     def _update_hook_status(self):
         m = self._macro
         if m.input_backend != "detours" or not m.use_target_window:
             self._hook_status_lbl.setText(""); return
-        hwnd = find_window_hwnd(m.target_window_title) if m.target_window_title else None
+        # Use the same skip_hwnds chain as _refresh_pid_label so the hook
+        # status matches the displayed PID.
+        skip_hwnds: set = set()
+        if self._group and self._lane_index > 0:
+            for prior_idx in range(self._lane_index):
+                prior = self._group.lanes[prior_idx]
+                _h = resolve_lane_hwnd(prior, skip_hwnds)
+                if _h:
+                    skip_hwnds.add(_h)
+        hwnd = resolve_lane_hwnd(m, skip_hwnds or None)
         pid  = get_window_pid(hwnd) if hwnd else 0
         if pid and _pipe_exists(pid):
             self._hook_status_lbl.setText("✓ Hook loaded")
@@ -4121,9 +4177,21 @@ class LaneWidget(QWidget):
         if not item: return
         hwnd, pid, title = item.data(Qt.ItemDataRole.UserRole)
         self._macro.target_window_title = title
+        # Pin which Nth match this specific HWND is so Secondary/Third can
+        # bind a distinct window even when the title string is identical.
+        self._macro.target_window_instance = self._compute_window_instance(title, int(hwnd))
         self._win_lbl.setText(title)
         self._refresh_pid_label()
         self.changed.emit(self._macro.id)
+
+    def _compute_window_instance(self, title: str, hwnd: int) -> int:
+        """Find which Nth match of *title* the given hwnd is (0-indexed) in
+        the deterministic ordering used by find_window_hwnds_all."""
+        try:
+            all_h = find_window_hwnds_all(title)
+            return all_h.index(int(hwnd)) if int(hwnd) in all_h else 0
+        except Exception:
+            return 0
 
     def _capture_window(self):
         self._capture_btn.setEnabled(False)
@@ -4136,8 +4204,12 @@ class LaneWidget(QWidget):
             self._capture_ctr -= 1
             QTimer.singleShot(1000, self._tick_capture)
         else:
+            fg_hwnd = int(_u32.GetForegroundWindow() or 0)
             title = get_foreground_title()
             self._macro.target_window_title = title
+            if title and fg_hwnd:
+                self._macro.target_window_instance = \
+                    self._compute_window_instance(title, fg_hwnd)
             self._win_lbl.setText(title or "(none)")
             self._capture_btn.setText("Capture 3s")
             self._capture_btn.setEnabled(self._macro.use_target_window)
@@ -4180,7 +4252,7 @@ class LaneWidget(QWidget):
 
         parent_win.showMinimized()
 
-        result: list = [None]
+        result: list = [None, 0]    # [title, hwnd]
         _stopped = threading.Event()
 
         def _get_root_hwnd(x, y) -> int:
@@ -4215,6 +4287,7 @@ class LaneWidget(QWidget):
                     title = buf.value.strip()
                     if title:
                         result[0] = title
+                        result[1] = int(hwnd)
             _stopped.set()
             ml.stop()
             return False   # stop listener
@@ -4226,7 +4299,7 @@ class LaneWidget(QWidget):
             return False
 
         # Wire the signal ONCE — it marshals result to GUI thread safely
-        def _on_drag_result(title: str):
+        def _on_drag_result(title: str, hwnd: int):
             self._drag_result.disconnect(_on_drag_result)
             hint.close()
             parent_win.showNormal()
@@ -4234,6 +4307,9 @@ class LaneWidget(QWidget):
             parent_win.activateWindow()
             if title:
                 self._macro.target_window_title = title
+                if hwnd:
+                    self._macro.target_window_instance = \
+                        self._compute_window_instance(title, int(hwnd))
                 self._win_lbl.setText(title)
                 self._refresh_pid_label()
                 self.changed.emit(self._macro.id)
@@ -4248,7 +4324,7 @@ class LaneWidget(QWidget):
             ml.join()
             kl.stop()
             # Emit signal — thread-safe, marshals to GUI event loop
-            self._drag_result.emit(result[0] or "")
+            self._drag_result.emit(result[0] or "", int(result[1] or 0))
 
         threading.Thread(target=_wait, daemon=True).start()
 
@@ -4294,8 +4370,7 @@ class LaneWidget(QWidget):
         Rectangle is converted to X/Y/W/H percentages of target window
         client area, then stored on the macro + reflected in spinners."""
         m = self._macro
-        hwnd = find_window_hwnd(m.target_window_title) if (
-            m.use_target_window and m.target_window_title) else None
+        hwnd = resolve_lane_hwnd(m)
         if not hwnd:
             QMessageBox.information(self, "Pick Region",
                 "Set 'Force Target Window' and pick a target window first — "
@@ -4431,8 +4506,7 @@ class LaneWidget(QWidget):
 
     def _test_ocr(self):
         m = self._macro
-        hwnd = find_window_hwnd(m.target_window_title) if (
-            m.use_target_window and m.target_window_title) else None
+        hwnd = resolve_lane_hwnd(m)
         text = _pixel_ocr_region(hwnd,
             self._guard_cap_x_spin.value(), self._guard_cap_y_spin.value(),
             self._guard_cap_w_spin.value(), self._guard_cap_h_spin.value())
@@ -6362,7 +6436,7 @@ class MainWindow(QMainWindow):
         m.events = []; lw._fill_table()
         target_hwnd = None
         if m.use_target_window and m.target_window_title:
-            target_hwnd = find_window_hwnd(m.target_window_title)
+            target_hwnd = resolve_lane_hwnd(m)
         rec = RecorderThread(
             record_mouse_move=m.record_mouse_move,
             filter_keys=self._build_shortcut_filter(),
