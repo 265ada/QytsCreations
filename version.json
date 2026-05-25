@@ -1,5 +1,5 @@
 {
     "version":  "1.68",
-    "sha256":  "9d300adc9d4d27bcb99ba8f7c3706a125af73416f71c6dc8d623692e07e4e289",
+    "sha256":  "aca1790fe8b7f83317f5871a3b2fb6f60f53fc7e6e3aba43c6aa603c71814674",
     "notes":  "v1.68: SHA256 integrity check for auto-updater + zombie-process guards (atexit + aboutToQuit timer + sys.excepthook hard-exit) so QytCroRec.exe never stays in Task Mgr after close or crash. Bundled new hook DLL with self-unload watchdog: if QytCroRec dies while a game has the hook injected, the DLL detects the dead owner within 5s and unhooks itself (game input back to vanilla, no game restart needed)."
 }
