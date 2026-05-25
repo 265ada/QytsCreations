@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.46"
+__version__ = "1.47"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2099,8 +2099,11 @@ class AutoUpdater:
             return {"version": remote, "notes": info.get("notes", "")}
         return None
 
+    # Last error message from download_and_install, surfaced to UI on failure
+    last_error: str = ""
+
     def download_and_install(self, target_path: Path,
-                             timeout: float = 60.0,
+                             timeout: float = 600.0,
                              new_version: str = "",
                              progress_cb=None) -> bool:
         """Download update and swap in.  Returns True on success.
@@ -2110,11 +2113,16 @@ class AutoUpdater:
         progress_cb(received_bytes, total_bytes) — optional, called as chunks
         arrive.  total_bytes may be 0 if server didn't send Content-Length.
         """
+        def _fail(reason: str) -> bool:
+            self.last_error = reason
+            print(f"[update] {reason}")
+            _log_crash(f"[update] {reason}")
+            return False
+
         if getattr(sys, "frozen", False):
             # ── EXE MODE ─────────────────────────────────────────────────────
             if not self.exe_url:
-                print("No EXE update URL configured.")
-                return False
+                return _fail("No EXE update URL configured.")
             current_exe = Path(sys.executable)
             # Name the temp download after the new version, not "_update"
             ver_tag      = new_version.strip() or "new"
@@ -2145,36 +2153,40 @@ class AutoUpdater:
                         try: os.fsync(fp.fileno())
                         except Exception: pass
             except Exception as e:
-                print(f"Exe update download failed: {e}")
                 try: partial_exe.unlink()
                 except Exception: pass
-                return False
+                return _fail(f"Download failed: {type(e).__name__}: {e}")
             # ── Integrity checks: size match + MZ header ─────────────────────
             actual = partial_exe.stat().st_size
             if actual < 1024 * 50:
-                print(f"Exe update sanity check failed (size={actual}).")
                 try: partial_exe.unlink()
                 except Exception: pass
-                return False
+                return _fail(f"Sanity check failed: only {actual} bytes received "
+                             f"(expected ~80 MB) — server returned an error page?")
             if total > 0 and actual != total:
-                print(f"Size mismatch: got {actual} expected {total} — download truncated.")
                 try: partial_exe.unlink()
                 except Exception: pass
-                return False
+                return _fail(f"Size mismatch: got {actual} expected {total} — "
+                             f"download truncated by network drop or AV.")
             with open(partial_exe, "rb") as fp:
                 head = fp.read(2)
             if head != b"MZ":
-                print(f"Not a valid Windows exe (magic={head!r}).")
                 try: partial_exe.unlink()
                 except Exception: pass
-                return False
+                return _fail(f"Not a valid Windows exe (first 2 bytes = {head!r}) — "
+                             f"server may have returned HTML / redirect page.")
             # Atomic rename .partial → final
             try:
                 if new_exe.exists(): new_exe.unlink()
                 partial_exe.replace(new_exe)
+            except PermissionError as e:
+                return _fail(f"Cannot write to {new_exe.parent} — "
+                             f"install dir not user-writable.  "
+                             f"Move QytCroRec.exe to a folder under your user profile "
+                             f"(e.g. Desktop or Downloads) instead of Program Files.  "
+                             f"({e})")
             except Exception as e:
-                print(f"Rename .partial failed: {e}")
-                return False
+                return _fail(f"Rename .partial -> final failed: {type(e).__name__}: {e}")
             # NOTE: backup of the current exe is done by the batch script
             # AFTER our process exits — copying a 77 MB running exe from
             # Python was blocking the GUI for many seconds while Defender
@@ -4072,7 +4084,7 @@ class MainWindow(QMainWindow):
 
     _global_shortcut_sig  = pyqtSignal(str)
     _update_available_sig = pyqtSignal(object, dict)   # (AutoUpdater, info_dict)
-    _update_done_sig      = pyqtSignal(bool)           # ok
+    _update_done_sig      = pyqtSignal(bool, str)      # ok, error_msg (when not ok)
     _update_progress_sig  = pyqtSignal(int, int)       # received, total
     _no_update_sig        = pyqtSignal(str)            # status message
 
@@ -4310,6 +4322,7 @@ class MainWindow(QMainWindow):
         # Run download off the GUI thread so UI doesn't freeze
         def _do_download():
             ok = False
+            err = ""
             try:
                 target = Path(__file__).resolve()
                 def _prog(rec, tot):
@@ -4317,12 +4330,14 @@ class MainWindow(QMainWindow):
                 ok = upd.download_and_install(target,
                                               new_version=info["version"],
                                               progress_cb=_prog)
+                if not ok:
+                    err = upd.last_error or "Unknown failure (see crash.log)"
             except Exception as e:
-                print(f"[update] worker exception: {e}")
+                err = f"Worker crashed: {type(e).__name__}: {e}"
                 _log_crash(f"[update worker] {e}\n{traceback.format_exc()}")
             finally:
                 # ALWAYS fire — never leave the GUI stuck at 100 %
-                try: self._update_done_sig.emit(bool(ok))
+                try: self._update_done_sig.emit(bool(ok), err)
                 except Exception: pass
         threading.Thread(target=_do_download, daemon=True).start()
 
@@ -4340,18 +4355,32 @@ class MainWindow(QMainWindow):
             mb_r = received / (1024 * 1024)
             self._update_dlg.setLabelText(f"Downloading…  {mb_r:.1f} MB")
 
-    def _on_update_done(self, ok: bool):
+    def _on_update_done(self, ok: bool, err: str = ""):
         if self._update_dlg:
             self._update_dlg.close()
             self._update_dlg = None
         if ok:
             self._set_status("Update downloaded — restarting in 1 s…", "#a6e3a1")
-            # Quick handoff to the batch swap script.
             QTimer.singleShot(800, self._restart_app)
         else:
             self._updating = False
-            QMessageBox.warning(self, "Update Failed",
-                "Could not download the update.  See console for details.")
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setWindowTitle("Update Failed")
+            msg.setText("Could not download the update.")
+            msg.setInformativeText(err or "Unknown failure.")
+            msg.setDetailedText(
+                "If this keeps happening, you can install manually:\n\n"
+                "1. Open https://github.com/265ada/QytsCreations/releases/latest\n"
+                "2. Download QytCroRec.exe\n"
+                "3. Replace your current exe with it\n\n"
+                "Common causes:\n"
+                " • Exe is in Program Files (not user-writable) — move to Desktop / Downloads\n"
+                " • Windows Defender / antivirus blocked the download\n"
+                " • Network drop mid-download — try again\n"
+                " • Corporate proxy / firewall blocking github.com")
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg.exec()
 
     def _restart_app(self):
         """Relaunch and quit this instance.  Handles both exe and script mode.

@@ -1,4 +1,4 @@
 {
-  "version": "1.46",
-  "notes": "v1.46: Feedback dialog adds delivery-method radios — GitHub Issue (preferred) or Email (mailto: opens default mail client, no account needed). Email destination: 265ada@gmail.com. Submit button label updates live to match the chosen route."
+  "version": "1.47",
+  "notes": "v1.47: Update Failed dialog now shows the ACTUAL error (download exception, size mismatch, wrong magic, permission denied, etc.) instead of useless 'see console' — PyInstaller windowed apps have no console. Default timeout raised 60s → 600s for slow networks. Specific PermissionError tells user to move exe out of Program Files. Includes manual-install instructions in detailed text."
 }
