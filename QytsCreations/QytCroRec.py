@@ -2346,14 +2346,24 @@ class AutoUpdater:
                 except Exception: pass
             try: lock_path.write_text(str(os.getpid()))
             except Exception: pass
+            # Raw paths (no extra quotes) for PowerShell Start-Process calls
+            exe_raw  = str(current_exe)
+            new_raw  = str(new_exe)
+            bak_raw  = str(backup_exe)
+            log_raw  = str(log_path)
+            lock_raw = str(lock_path)
             batch_path.write_text(
                 "@echo off\r\n"
                 "setlocal EnableDelayedExpansion\r\n"
-                f"set EXE=\"{current_exe}\"\r\n"
-                f"set NEW=\"{new_exe}\"\r\n"
-                f"set BAK=\"{backup_exe}\"\r\n"
-                f"set LOG=\"{log_path}\"\r\n"
-                f"set LOCK=\"{lock_path}\"\r\n"
+                # Use quoted variables for CMD copy/move commands
+                f"set EXE=\"{exe_raw}\"\r\n"
+                f"set NEW=\"{new_raw}\"\r\n"
+                f"set BAK=\"{bak_raw}\"\r\n"
+                f"set LOG=\"{log_raw}\"\r\n"
+                f"set LOCK=\"{lock_raw}\"\r\n"
+                # Raw (unquoted) paths for PowerShell -FilePath/-ArgumentList
+                f"set EXE_RAW={exe_raw}\r\n"
+                f"set BAK_RAW={bak_raw}\r\n"
                 "echo [%date% %time%] update batch started >> %LOG%\r\n"
                 "set /a TRIES=0\r\n"
                 ":retry\r\n"
@@ -2375,17 +2385,27 @@ class AutoUpdater:
                 "ping -n 4 127.0.0.1 >nul\r\n"
                 ":launch\r\n"
                 "echo [%date% %time%] launching new exe >> %LOG%\r\n"
-                "start \"\" %EXE%\r\n"
+                # Use PowerShell Start-Process so the new GUI app is fully detached
+                # and visible, regardless of the hidden-console context we're in.
+                "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "
+                "\"Start-Process -FilePath '%EXE_RAW%'\" >nul 2>&1\r\n"
+                "echo [%date% %time%] start-process fired >> %LOG%\r\n"
+                # Verify launch without a pipe (pipes can hang on Win11 WT).
+                # Write tasklist output to a temp file then type-search it.
                 "ping -n 5 127.0.0.1 >nul\r\n"
-                "tasklist /FI \"IMAGENAME eq QytCroRec.exe\" 2>nul | find /I \"QytCroRec.exe\" >nul\r\n"
+                "set CHK=%TEMP%\\_qyt_chk.txt\r\n"
+                "tasklist /FI \"IMAGENAME eq QytCroRec.exe\" /FO CSV 2>nul > %CHK%\r\n"
+                "find /I \"QytCroRec.exe\" %CHK% >nul 2>&1\r\n"
+                "del /f /q %CHK% >nul 2>&1\r\n"
                 "if not errorlevel 1 goto ok\r\n"
-                "echo [%date% %time%] new exe died - rolling back to backup >> %LOG%\r\n"
+                "echo [%date% %time%] new exe not found after launch - rolling back >> %LOG%\r\n"
                 "if exist %BAK% (\r\n"
                 "  copy /y %BAK% %EXE% >nul\r\n"
-                "  start \"\" %EXE%\r\n"
+                "  powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "
+                "\"Start-Process -FilePath '%BAK_RAW%'\" >nul 2>&1\r\n"
                 "  echo [%date% %time%] rollback complete >> %LOG%\r\n"
                 ") else (\r\n"
-                "  echo [%date% %time%] no backup available - manual reinstall needed >> %LOG%\r\n"
+                "  echo [%date% %time%] no backup - manual reinstall needed >> %LOG%\r\n"
                 ")\r\n"
                 "goto end\r\n"
                 ":ok\r\n"
