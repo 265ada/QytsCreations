@@ -88,12 +88,126 @@
     </Setter>
   </Style>
 
-  <!-- ComboBox -->
+  <!-- ComboBox + ComboBoxItem -->
+  <!-- Toggle button used by the ComboBox template -->
+  <Style x:Key="ComboBoxToggleButtonStyle" TargetType="ToggleButton">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="ClickMode" Value="Press"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ToggleButton">
+          <Grid Background="{TemplateBinding Background}">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="22"/>
+            </Grid.ColumnDefinitions>
+            <Path Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Data="M 0 0 L 8 0 L 4 5 Z" Fill="{StaticResource TextBrush}"/>
+          </Grid>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
   <Style TargetType="ComboBox">
     <Setter Property="Background"   Value="{StaticResource MantleBrush}"/>
     <Setter Property="Foreground"   Value="{StaticResource TextBrush}"/>
     <Setter Property="BorderBrush"  Value="{StaticResource Surface0Brush}"/>
-    <Setter Property="Padding"      Value="6,4"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding"      Value="8,5"/>
+    <Setter Property="FontFamily"   Value="Segoe UI"/>
+    <Setter Property="FontSize"     Value="13"/>
+    <Setter Property="MinHeight"    Value="28"/>
+    <Setter Property="TextElement.Foreground" Value="{StaticResource TextBrush}"/>
+    <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ComboBox">
+          <Grid>
+            <Border x:Name="MainBorder"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="4"/>
+
+            <ToggleButton x:Name="ToggleBtn"
+                          Style="{StaticResource ComboBoxToggleButtonStyle}"
+                          IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"/>
+
+            <ContentPresenter x:Name="ContentSite"
+                              Margin="{TemplateBinding Padding}"
+                              HorizontalAlignment="Left"
+                              VerticalAlignment="Center"
+                              Content="{TemplateBinding SelectionBoxItem}"
+                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                              IsHitTestVisible="False"
+                              TextElement.Foreground="{StaticResource TextBrush}"/>
+
+            <Popup x:Name="PART_Popup"
+                   Placement="Bottom"
+                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                   AllowsTransparency="True"
+                   Focusable="False"
+                   PopupAnimation="Slide">
+              <Border x:Name="DropDownBorder"
+                      Background="{StaticResource MantleBrush}"
+                      BorderBrush="{StaticResource Surface0Brush}"
+                      BorderThickness="1"
+                      CornerRadius="4"
+                      MinWidth="{Binding ActualWidth, ElementName=MainBorder}"
+                      MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                <ScrollViewer SnapsToDevicePixels="True">
+                  <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained"/>
+                </ScrollViewer>
+              </Border>
+            </Popup>
+          </Grid>
+
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="MainBorder" Property="BorderBrush" Value="{StaticResource BlueBrush}"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Opacity" Value="0.55"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style TargetType="ComboBoxItem">
+    <Setter Property="Background"   Value="{StaticResource MantleBrush}"/>
+    <Setter Property="Foreground"   Value="{StaticResource TextBrush}"/>
+    <Setter Property="Padding"      Value="8,5"/>
+    <Setter Property="FontFamily"   Value="Segoe UI"/>
+    <Setter Property="FontSize"     Value="13"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ComboBoxItem">
+          <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                  Padding="{TemplateBinding Padding}">
+            <ContentPresenter/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="{StaticResource Surface0Brush}"/>
+              <Setter Property="Foreground" Value="{StaticResource BlueBrush}"/>
+            </Trigger>
+            <Trigger Property="IsHighlighted" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="{StaticResource Surface0Brush}"/>
+              <Setter Property="Foreground" Value="{StaticResource BlueBrush}"/>
+            </Trigger>
+            <Trigger Property="IsSelected" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="{StaticResource Surface1Brush}"/>
+              <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
   </Style>
 
   <!-- Label / TextBlock -->
