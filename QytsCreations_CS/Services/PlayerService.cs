@@ -28,6 +28,43 @@ public class PlayerService
         _cts = null; _task = null;
     }
 
+    /// <summary>Send a single key tap (down+up) — used by pixel guard correction.</summary>
+    public void SendKeyTap(string keyChar)
+    {
+        if (string.IsNullOrEmpty(keyChar)) return;
+        var ev = new MacroEvent
+        {
+            EventType = "key_down",
+            Data = new Dictionary<string, object?> { ["vk"] = CharToVk(keyChar) }
+        };
+        FireEvent(ev, IntPtr.Zero);
+        Thread.Sleep(40);
+        ev.EventType = "key_up";
+        FireEvent(ev, IntPtr.Zero);
+    }
+
+    /// <summary>Play a guard correction macro inline (blocking, ignores cancellation token).</summary>
+    public void PlayInline(Macro macro, IntPtr hwnd)
+    {
+        double prevTs = 0;
+        foreach (var ev in macro.Events)
+        {
+            double delay = (ev.Timestamp - prevTs) / Math.Max(0.01, macro.SpeedMultiplier);
+            if (delay > 0.001) Thread.Sleep(Math.Min((int)(delay * 1000), 30_000));
+            prevTs = ev.Timestamp;
+            FireEvent(ev, hwnd);
+        }
+    }
+
+    private static int CharToVk(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return 0;
+        char c = char.ToUpperInvariant(s[0]);
+        if (c >= 'A' && c <= 'Z') return c;
+        if (c >= '0' && c <= '9') return c;
+        return 0;
+    }
+
     private void PlayLoop(Macro macro, IntPtr hwnd, CancellationToken ct)
     {
         int reps = macro.RepeatCount == 0 ? int.MaxValue : macro.RepeatCount;

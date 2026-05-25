@@ -1,0 +1,4 @@
+{
+  "version": "1.0.0",
+  "changelog": "Initial C# WPF port. Full feature parity with Python: 3 lanes (Primary/Secondary/Third), Detours hook DLL support, Pixel Guard, Shortcuts tab, system tray, auto-update, diag/crash log, feedback. Shares data with Python version (~/.macro_recorder)."
+}

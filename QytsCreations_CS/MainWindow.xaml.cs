@@ -1,80 +1,153 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
+using QytCroRec.Dialogs;
 using QytCroRec.Models;
 using QytCroRec.Services;
+using QytCroRec.Views;
 
 namespace QytCroRec;
 
 public partial class MainWindow : Window
 {
-    // â”€â”€ services â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    private readonly StorageService       _storage;
+    // ── services ──────────────────────────────────────────────
+    private readonly StorageService      _storage;
+    private readonly GlobalHotkeyService _hotkeys;
+    private readonly AutoUpdateService   _updater;
+    private TrayService?                 _tray;
 
-    private readonly GlobalHotkeyService  _hotkeys;
-    private RecorderService?              _recorder;
-    private PlayerService?                _player;
+    private RecorderService?    _recorder;
+    private readonly Dictionary<int, PlayerService> _runningPlayers = new();
+    private readonly Dictionary<int, PixelGuardService> _activeGuards = new();
 
-    // â”€â”€ state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    private readonly ObservableCollection<MacroGroup> _groups = new();
-    private MacroGroup? _curGroup;
-    private int         _curLane;   // 0=Primary,1=Secondary,2=Third
-    private bool        _recording;
-    private bool        _playing;
-    private bool        _suppressUi; // block change handlers during load
+    // ── state ─────────────────────────────────────────────────
+    private readonly ObservableCollection<MacroGroup> _groups       = new();
+    private List<Macro>                               _guardMacros  = new();
+    private Dictionary<string, string>                _shortcutsCfg = Shortcuts.Defaults;
+    private AppSettings                               _settings     = new();
+    private MacroGroup?                               _curGroup;
+    private int                                       _currentLaneTab;
+    private bool                                      _recording;
+    private int                                       _recordLaneIndex;
 
-    // hotkey IDs
-    private int _hkRecord  = -1;
-    private int _hkPlay    = -1;
-    private int _hkStopAll = -1;
+    private readonly LaneView _viewP = new(), _viewS = new(), _viewT = new();
+    private readonly ShortcutsView _viewShortcuts = new();
 
-    // pid-refresh timer
     private readonly DispatcherTimer _pidTimer;
 
     public MainWindow()
     {
         InitializeComponent();
-
         _storage = new StorageService();
         _hotkeys = new GlobalHotkeyService(this);
+        _updater = new AutoUpdateService(GetVersion());
 
         GroupList.ItemsSource = _groups;
 
+        LaneViewPrimary.Content   = _viewP;
+        LaneViewSecondary.Content = _viewS;
+        LaneViewThird.Content     = _viewT;
+        ShortcutsView.Content     = _viewShortcuts;
+
+        WireLaneView(_viewP, 0);
+        WireLaneView(_viewS, 1);
+        WireLaneView(_viewT, 2);
+
+        _viewShortcuts.Changed += cfg =>
+        {
+            _shortcutsCfg = cfg;
+            _storage.SaveShortcuts(cfg);
+            RegisterHotkeys();
+            UpdateHotkeyHint();
+        };
+
         _pidTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-        _pidTimer.Tick += (_, _) => RefreshPidLabels();
+        _pidTimer.Tick += (_, _) =>
+        {
+            _viewP.RefreshPidStatus();
+            _viewS.RefreshPidStatus();
+            _viewT.RefreshPidStatus();
+        };
         _pidTimer.Start();
 
-        Loaded  += OnLoaded;
-        Closing += OnClosing;
+        Loaded     += OnLoaded;
+        Closing    += OnClosing;
+        StateChanged += OnStateChanged;
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    private void WireLaneView(LaneView v, int laneIndex)
+    {
+        v.RecordClick    += () => ToggleRecord(laneIndex);
+        v.PlayClick      += () => StartPlay(laneIndex);
+        v.StopClick      += () => StopLane(laneIndex);
+        v.ChangedAndSave += () => SaveCurrentGroup();
+        v.Log            += Log;
+    }
+
+    // ═══════════════════════════════════════════════════════════
     //  STARTUP / SHUTDOWN
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        _settings     = _storage.LoadSettings();
+        _shortcutsCfg = _storage.LoadShortcuts();
+        if (_shortcutsCfg.Count == 0) _shortcutsCfg = Shortcuts.Defaults;
+        _guardMacros  = _storage.LoadGuardMacros();
+        RefreshGuardMacroList();
+
+        ChkAutoUpdate.IsChecked = _settings.AutoUpdate;
+        _viewShortcuts.LoadConfig(_shortcutsCfg);
+
         LoadGroups();
         RegisterHotkeys();
+        UpdateHotkeyHint();
+
         string ver = GetVersion();
         VersionLabel.Text = $"v{ver}";
-        Log($"QytCroRec {ver} loaded â€” {_groups.Count} group(s)");
+        Log($"QytCroRec {ver} (C#) loaded — {_groups.Count} group(s)");
+        _storage.DiagLog($"Started v{ver}");
+
+        _tray = new TrayService(this);
+        _tray.Initialize();
+        _tray.RequestStopAll += () => Dispatcher.InvokeAsync(StopAll);
+
+        if (_settings.AutoUpdate)
+            _ = Task.Run(async () =>
+            {
+                var (newer, newVer, log) = await _updater.CheckAsync();
+                if (newer) Dispatcher.InvokeAsync(() => PromptUpdate(newVer, log));
+            });
     }
 
-    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    private void OnClosing(object? sender, CancelEventArgs e)
     {
+        if (_settings.MinimizeToTray && _tray != null)
+        {
+            e.Cancel = true;
+            _tray.HideToTray();
+            return;
+        }
         StopAll();
         _hotkeys.Dispose();
+        _tray?.Dispose();
         _pidTimer.Stop();
         SaveCurrentGroup();
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  STORAGE
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    private void OnStateChanged(object? s, EventArgs e)
+    {
+        if (WindowState == WindowState.Minimized && _settings.MinimizeToTray && _tray != null)
+            _tray.HideToTray();
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  STORAGE / GROUPS
+    // ═══════════════════════════════════════════════════════════
     private void LoadGroups()
     {
         var loaded = _storage.LoadGroups();
@@ -91,61 +164,89 @@ public partial class MainWindow : Window
 
     private void SaveCurrentGroup() => _storage.SaveGroups([.. _groups]);
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    private void RefreshGuardMacroList()
+    {
+        GuardMacroList.Items.Clear();
+        foreach (var gm in _guardMacros)
+            GuardMacroList.Items.Add($"{gm.Name}  ({gm.Events.Count} ev)");
+    }
+
+    // ═══════════════════════════════════════════════════════════
     //  HOTKEYS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     private void RegisterHotkeys()
     {
-        _hkRecord  = _hotkeys.Register("Ctrl+R", ToggleRecord);
-        _hkStopAll = _hotkeys.Register("End",    StopAll);
-        _hkPlay    = _hotkeys.Register("F5",     TogglePlay);
-        UpdateHotkeyHint();
-    }
-
-    private void UpdateHotkeyHint() =>
-        HotkeyHint.Text = "Record: Ctrl+R  |  Play: F5  |  Stop: End";
-
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  RECORD
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void ToggleRecord()
-    {
-        Dispatcher.Invoke(() =>
+        _hotkeys.UnregisterAll();
+        Reg("toggle_record", () => ToggleRecord(_currentLaneTab));
+        Reg("play",          () => StartPlay(_currentLaneTab));
+        Reg("stop",          () => StopLane(_currentLaneTab));
+        Reg("stop_all",      StopAll);
+        Reg("play_chain",    PlayChain);
+        Reg("capture_window", () => _viewP.Dispatcher.Invoke(() =>
         {
-            if (_recording) StopRecord();
-            else            StartRecord();
-        });
+            var view = CurrentLaneView();
+            view?.Dispatcher.Invoke(() => (view).GetType()
+                .GetMethod("BtnCapture3s_Click",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                ?.Invoke(view, new object[] { view, new RoutedEventArgs() }));
+        }));
     }
 
-    private void StartRecord()
+    private void Reg(string action, Action handler)
+    {
+        string key = Shortcuts.Get(_shortcutsCfg, action);
+        if (string.IsNullOrWhiteSpace(key)) return;
+        _hotkeys.Register(key, () => Dispatcher.InvokeAsync(handler));
+    }
+
+    private void UpdateHotkeyHint() => HotkeyHint.Text =
+        $"Rec: {Shortcuts.Get(_shortcutsCfg, "toggle_record")}  |  " +
+        $"Play: {Shortcuts.Get(_shortcutsCfg, "play")}  |  " +
+        $"Stop All: {Shortcuts.Get(_shortcutsCfg, "stop_all")}  |  " +
+        $"Chain: {Shortcuts.Get(_shortcutsCfg, "play_chain")}";
+
+    private LaneView? CurrentLaneView() => _currentLaneTab switch
+    {
+        0 => _viewP, 1 => _viewS, 2 => _viewT, _ => null
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    //  RECORD
+    // ═══════════════════════════════════════════════════════════
+    private void ToggleRecord(int laneIndex)
+    {
+        if (_recording) StopRecord();
+        else            StartRecord(laneIndex);
+    }
+
+    private void StartRecord(int laneIndex)
     {
         if (_curGroup == null || _recording) return;
-        var lane = CurrentMacro();
-        if (lane == null) return;
+        if (laneIndex < 0 || laneIndex >= 3) return;
+        var lane = _curGroup.Lanes[laneIndex];
+        _recordLaneIndex = laneIndex;
 
         _recording = true;
-        BtnRecord.Content = "â¹  Stop Rec";
-        SetStatus("Recordingâ€¦");
+        SetLaneStatus(laneIndex, "Recording…", true);
         TtsService.Speak($"Recording {lane.Name}");
-        Log($"Recording started â€” {lane.Name}");
+        Log($"Recording started — lane {laneIndex + 1}: {lane.Name}");
 
         lane.Events.Clear();
-        RefreshCurrentGrid();
+        CurrentLaneView()?.Reload();
 
-        bool recMove = true; // TODO: expose in settings
-        IntPtr hwnd  = IntPtr.Zero;
+        IntPtr hwnd = IntPtr.Zero;
         if (lane.UseTargetWindow && !string.IsNullOrEmpty(lane.TargetWindowTitle))
-            hwnd = Win32.FindWindowsByTitle(lane.TargetWindowTitle ?? "").Select(x => x.hwnd).FirstOrDefault();
+            hwnd = Win32.ResolveWindowHwnd(lane.TargetWindowTitle, lane.TargetWindowInstance, null);
 
-        _recorder = new RecorderService(recMove, hwnd);
+        _recorder = new RecorderService(lane.RecordMouseMove, hwnd);
         _recorder.EventCaptured += ev =>
             Dispatcher.InvokeAsync(() =>
             {
                 lane.Events.Add(ev);
-                RefreshCurrentGrid();
+                CurrentLaneView()?.Reload();
             });
-        _recorder.RecordingEnded += () => Dispatcher.InvokeAsync(StopRecord);
         _recorder.Start();
+        LaneTabs.SelectedIndex = laneIndex;
     }
 
     private void StopRecord()
@@ -155,14 +256,13 @@ public partial class MainWindow : Window
         _recorder?.Stop();
         _recorder = null;
 
-        BtnRecord.Content = "âº  Record";
-        SetStatus("Ready");
+        SetLaneStatus(_recordLaneIndex, "Idle", false);
         TtsService.Speak("Recording complete");
         SaveCurrentGroup();
         Log("Recording stopped");
 
         // auto-switch to next empty lane
-        if (_curGroup != null && _curLane == 0)
+        if (_curGroup != null && _recordLaneIndex == 0)
         {
             for (int ni = 1; ni < _curGroup.Lanes.Count; ni++)
             {
@@ -177,86 +277,149 @@ public partial class MainWindow : Window
         }
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  PLAY
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void TogglePlay()
+    private void SetLaneStatus(int laneIndex, string text, bool running)
     {
-        Dispatcher.Invoke(() =>
+        switch (laneIndex)
         {
-            if (_playing) StopAll();
-            else          StartPlay();
-        });
+            case 0: _viewP.SetStatus(text, running); break;
+            case 1: _viewS.SetStatus(text, running); break;
+            case 2: _viewT.SetStatus(text, running); break;
+        }
     }
 
-    private void StartPlay()
+    // ═══════════════════════════════════════════════════════════
+    //  PLAY
+    // ═══════════════════════════════════════════════════════════
+    private void StartPlay(int laneIndex)
     {
-        if (_curGroup == null || _playing) return;
-        var activeLanes = _curGroup.Lanes.Where(l => l.LaneEnabled && l.Events.Count > 0).ToList();
-        if (activeLanes.Count == 0) { Log("No events to play."); return; }
+        if (_curGroup == null) return;
+        if (laneIndex < 0 || laneIndex >= 3) return;
+        var lane = _curGroup.Lanes[laneIndex];
+        if (lane.Events.Count == 0) { Log($"Lane {laneIndex + 1} has no events."); return; }
 
-        _playing = true;
-        BtnPlay.Content = "â¸  Pause";
-        SetStatus("Playingâ€¦");
-        Log($"Playback started â€” {activeLanes.Count} lane(s)");
+        // resolve hwnd (with skip-chain of prior lanes that are also playing)
+        var skip = new HashSet<IntPtr>();
+        foreach (var (_, _) in _runningPlayers) { /* nothing */ }
+        IntPtr hwnd = lane.UseTargetWindow && !string.IsNullOrEmpty(lane.TargetWindowTitle)
+            ? Win32.ResolveWindowHwnd(lane.TargetWindowTitle, lane.TargetWindowInstance, skip)
+            : IntPtr.Zero;
 
-        // resolve HWNDs with instance-aware skip chain
-        var claimed = new HashSet<IntPtr>();
-        var players = new List<(PlayerService svc, Macro macro, IntPtr hwnd)>();
+        var svc = new PlayerService();
+        svc.Completed += () => Dispatcher.InvokeAsync(() => LaneCompleted(laneIndex));
+        _runningPlayers[laneIndex] = svc;
+        SetLaneStatus(laneIndex, "▶ Playing", true);
+        Log($"Lane {laneIndex + 1} playing → {lane.Events.Count} events");
+        svc.Play(lane, hwnd);
 
-        foreach (var lane in activeLanes)
+        // start guard if enabled
+        if (lane.PixelGuardEnabled && hwnd != IntPtr.Zero)
         {
-            var hwnd = Win32.ResolveWindowHwnd(lane.TargetWindowTitle,
-                        lane.UseTargetWindow ? lane.TargetWindowInstance : -1, claimed);
-            if (hwnd != IntPtr.Zero) claimed.Add(hwnd);
+            var pg = new PixelGuardService();
+            pg.StatusEvent += t => Log($"[guard L{laneIndex+1}] {t}");
+            pg.Start(lane, hwnd,
+                key => svc.SendKeyTap(key),
+                m   => svc.PlayInline(m, hwnd),
+                _guardMacros);
+            _activeGuards[laneIndex] = pg;
+        }
+    }
 
-            var svc = new PlayerService();
-            svc.Completed += () => Dispatcher.InvokeAsync(CheckAllDone);
-            players.Add((svc, lane, hwnd));
+    private void LaneCompleted(int laneIndex)
+    {
+        SetLaneStatus(laneIndex, "Idle", false);
+        _runningPlayers.Remove(laneIndex);
+        if (_activeGuards.TryGetValue(laneIndex, out var pg))
+        {
+            pg.Stop();
+            _activeGuards.Remove(laneIndex);
+        }
+        if (_curGroup != null)
+        {
+            _curGroup.Lanes[laneIndex].RunCount++;
+            RefreshRunsLabel();
+        }
+    }
+
+    private void StopLane(int laneIndex)
+    {
+        if (_runningPlayers.TryGetValue(laneIndex, out var svc))
+        {
+            svc.Stop();
+            _runningPlayers.Remove(laneIndex);
+        }
+        if (_activeGuards.TryGetValue(laneIndex, out var pg))
+        {
+            pg.Stop();
+            _activeGuards.Remove(laneIndex);
+        }
+        SetLaneStatus(laneIndex, "Idle", false);
+    }
+
+    private void PlayChain()
+    {
+        if (_curGroup == null) return;
+        var active = _curGroup.Lanes
+            .Select((l, i) => (lane: l, idx: i))
+            .Where(t => t.lane.LaneEnabled && t.lane.Events.Count > 0)
+            .ToList();
+        if (active.Count == 0) { Log("No lanes to play."); return; }
+
+        // pre-resolve hwnds with skip chain
+        var claimed = new HashSet<IntPtr>();
+        var hwnds   = new Dictionary<int, IntPtr>();
+        foreach (var (lane, idx) in active)
+        {
+            if (lane.UseTargetWindow && !string.IsNullOrEmpty(lane.TargetWindowTitle))
+            {
+                var h = Win32.ResolveWindowHwnd(lane.TargetWindowTitle, lane.TargetWindowInstance, claimed);
+                if (h != IntPtr.Zero) { claimed.Add(h); hwnds[idx] = h; }
+            }
         }
 
-        // barrier-start all lanes simultaneously
-        var barrier = new System.Threading.Barrier(players.Count);
-        foreach (var (svc, macro, hwnd) in players)
+        var barrier = new System.Threading.Barrier(active.Count);
+        Log($"Play Chain → {active.Count} lane(s) launching in sync");
+
+        foreach (var (lane, idx) in active)
         {
-            var m = macro; var h = hwnd; var b = barrier;
+            var svc = new PlayerService();
+            svc.Completed += () => Dispatcher.InvokeAsync(() => LaneCompleted(idx));
+            _runningPlayers[idx] = svc;
+            SetLaneStatus(idx, "▶ Playing", true);
+
+            var h = hwnds.GetValueOrDefault(idx, IntPtr.Zero);
+            var li = idx; var ln = lane;
             Task.Run(() =>
             {
-                try { b.SignalAndWait(10_000); } catch { return; }
-                svc.Play(m, h);
+                try { barrier.SignalAndWait(10_000); } catch { return; }
+                svc.Play(ln, h);
             });
+
+            if (lane.PixelGuardEnabled && h != IntPtr.Zero)
+            {
+                var pg = new PixelGuardService();
+                pg.StatusEvent += t => Log($"[guard L{idx+1}] {t}");
+                pg.Start(lane, h, key => svc.SendKeyTap(key), m => svc.PlayInline(m, h), _guardMacros);
+                _activeGuards[idx] = pg;
+            }
         }
-
-        _player = players.FirstOrDefault().svc; // keep ref for stop
-    }
-
-    private void CheckAllDone()
-    {
-        // simple: stop when primary done
-        StopAll();
     }
 
     private void StopAll()
     {
-        _player?.Stop();
-        _player   = null;
-        _playing  = false;
-        Dispatcher.InvokeAsync(() =>
-        {
-            BtnPlay.Content = "â–¶  Play";
-            SetStatus("Ready");
-        });
-    }
-
-    private void StopRecord_And_Play()
-    {
+        foreach (var (_, svc) in _runningPlayers.ToList()) svc.Stop();
+        _runningPlayers.Clear();
+        foreach (var (_, pg) in _activeGuards.ToList()) pg.Stop();
+        _activeGuards.Clear();
         if (_recording) StopRecord();
-        StopAll();
+        SetLaneStatus(0, "Idle", false);
+        SetLaneStatus(1, "Idle", false);
+        SetLaneStatus(2, "Idle", false);
+        Log("Stop All");
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     //  GROUP MANAGEMENT
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     private void BtnAddGroup_Click(object s, RoutedEventArgs e)
     {
         var g = new MacroGroup { Name = $"Group {_groups.Count + 1}" };
@@ -265,6 +428,9 @@ public partial class MainWindow : Window
         GroupList.SelectedItem = g;
         SaveCurrentGroup();
     }
+
+    private void BtnDuplicate_Click(object s, RoutedEventArgs e) => GroupCtx_Duplicate(s, e);
+    private void BtnDelete_Click(object s, RoutedEventArgs e)    => GroupCtx_Delete(s, e);
 
     private void GroupList_SelectionChanged(object s, SelectionChangedEventArgs e)
     {
@@ -275,18 +441,14 @@ public partial class MainWindow : Window
         }
     }
 
-    private void GroupList_MouseDoubleClick(object s, MouseButtonEventArgs e)
-    {
-        if (_curGroup == null) return;
-        string? name = InputDialog("Rename Group", "Name:", _curGroup.Name);
-        if (name != null) { _curGroup.Name = name; RefreshGroupList(); SaveCurrentGroup(); }
-    }
+    private void GroupList_MouseDoubleClick(object s, MouseButtonEventArgs e) =>
+        GroupCtx_Rename(s, e);
 
     private void GroupCtx_Rename(object s, RoutedEventArgs e)
     {
         if (_curGroup == null) return;
-        string? name = InputDialog("Rename Group", "Name:", _curGroup.Name);
-        if (name != null) { _curGroup.Name = name; RefreshGroupList(); SaveCurrentGroup(); }
+        string? name = InputDialog.Prompt(this, "Rename Group", "Name:", _curGroup.Name);
+        if (name != null) { _curGroup.Name = name; GroupList.Items.Refresh(); SaveCurrentGroup(); }
     }
 
     private void GroupCtx_Duplicate(object s, RoutedEventArgs e)
@@ -310,284 +472,173 @@ public partial class MainWindow : Window
         SaveCurrentGroup();
     }
 
-    private void RefreshGroupList() => GroupList.Items.Refresh();
-
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     //  LOAD GROUP INTO UI
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     private void LoadGroupToUi(MacroGroup g)
     {
-        _suppressUi = true;
-        GroupNameLabel.Text      = g.Name;
-        ChkGroupEnabled.IsChecked = g.Enabled;
-        TxtRepeat.Text           = g.Primary.RepeatCount.ToString();
-        TxtSpeed.Text            = g.Primary.SpeedMultiplier.ToString("F2");
+        g.EnsureLanes();
+        _viewP.Bind(g, 0, _guardMacros);
+        _viewS.Bind(g, 1, _guardMacros);
+        _viewT.Bind(g, 2, _guardMacros);
 
-        // primary lane
-        ChkPrimaryWindow.IsChecked = g.Primary.UseTargetWindow;
-        TxtPrimaryWindow.Text      = g.Primary.TargetWindowTitle ?? "";
+        // pixel guard panel
+        int src = Math.Clamp(g.SharedGuardLane >= 0 ? g.SharedGuardLane : 0, 0, 2);
+        CmbGuardSource.SelectedIndex = src;
+        ChkGuardPri.IsChecked = (g.SharedGuardUsers & 0b001) != 0;
+        ChkGuardSec.IsChecked = (g.SharedGuardUsers & 0b010) != 0;
+        ChkGuardThi.IsChecked = (g.SharedGuardUsers & 0b100) != 0;
 
-        // secondary lane
-        ChkSecEnabled.IsChecked  = g.Secondary.LaneEnabled;
-        ChkSecWindow.IsChecked   = g.Secondary.UseTargetWindow;
-        TxtSecWindow.Text        = g.Secondary.TargetWindowTitle ?? "";
-
-        // third lane
-        ChkThirdEnabled.IsChecked = g.Third.LaneEnabled;
-        ChkThirdWindow.IsChecked  = g.Third.UseTargetWindow;
-        TxtThirdWindow.Text       = g.Third.TargetWindowTitle ?? "";
-
-        RefreshAllGrids();
-        RefreshPidLabels();
         RefreshRunsLabel();
-        _suppressUi = false;
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  DATA GRIDS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void RefreshAllGrids()
-    {
-        if (_curGroup == null) return;
-        GridPrimary.ItemsSource   = _curGroup.Primary.Events;
-        GridSecondary.ItemsSource = _curGroup.Secondary.Events;
-        GridThird.ItemsSource     = _curGroup.Third.Events;
-    }
-
-    private void RefreshCurrentGrid()
-    {
-        if (_curGroup == null) return;
-        var grid = _curLane switch { 1 => GridSecondary, 2 => GridThird, _ => GridPrimary };
-        grid.Items.Refresh();
-    }
-
-    private void EventGrid_SelectionChanged(object s, SelectionChangedEventArgs e) { }
-
-    private void EventGrid_KeyDown(object s, KeyEventArgs e)
-    {
-        if (e.Key == Key.Delete && s is DataGrid dg && dg.SelectedItem is MacroEvent ev)
-        {
-            CurrentMacro()?.Events.Remove(ev);
-            dg.Items.Refresh();
-            SaveCurrentGroup();
-        }
-    }
-
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     //  TABS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     private void LaneTabs_SelectionChanged(object s, SelectionChangedEventArgs e)
     {
-        _curLane = LaneTabs.SelectedIndex;
+        _currentLaneTab = LaneTabs.SelectedIndex;
     }
 
-    private Macro? CurrentMacro() =>
-        _curGroup == null ? null : _curGroup.Lanes[Math.Clamp(_curLane, 0, _curGroup.Lanes.Count - 1)];
-
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  LANE CONTROLS â€” PRIMARY
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void ChkPrimaryWindow_Changed(object s, RoutedEventArgs e)
-    {
-        if (_suppressUi || _curGroup == null) return;
-        _curGroup.Primary.UseTargetWindow = ChkPrimaryWindow.IsChecked == true;
-        SaveCurrentGroup();
-    }
-
-    private void TxtPrimaryWindow_Changed(object s, TextChangedEventArgs e)
-    {
-        if (_suppressUi || _curGroup == null) return;
-        _curGroup.Primary.TargetWindowTitle = TxtPrimaryWindow.Text;
-        RefreshPidLabels();
-        SaveCurrentGroup();
-    }
-
-    private void BtnPrimaryPick_Click(object s, RoutedEventArgs e) => PickWindow(0);
-
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  LANE CONTROLS â€” SECONDARY
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void ChkSecEnabled_Changed(object s, RoutedEventArgs e)
-    {
-        if (_suppressUi || _curGroup == null) return;
-        _curGroup.Secondary.LaneEnabled = ChkSecEnabled.IsChecked == true;
-        SaveCurrentGroup();
-    }
-
-    private void ChkSecWindow_Changed(object s, RoutedEventArgs e)
-    {
-        if (_suppressUi || _curGroup == null) return;
-        _curGroup.Secondary.UseTargetWindow = ChkSecWindow.IsChecked == true;
-        SaveCurrentGroup();
-    }
-
-    private void TxtSecWindow_Changed(object s, TextChangedEventArgs e)
-    {
-        if (_suppressUi || _curGroup == null) return;
-        _curGroup.Secondary.TargetWindowTitle = TxtSecWindow.Text;
-        RefreshPidLabels();
-        SaveCurrentGroup();
-    }
-
-    private void BtnSecPick_Click(object s, RoutedEventArgs e) => PickWindow(1);
-
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  LANE CONTROLS â€” THIRD
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void ChkThirdEnabled_Changed(object s, RoutedEventArgs e)
-    {
-        if (_suppressUi || _curGroup == null) return;
-        _curGroup.Third.LaneEnabled = ChkThirdEnabled.IsChecked == true;
-        SaveCurrentGroup();
-    }
-
-    private void ChkThirdWindow_Changed(object s, RoutedEventArgs e)
-    {
-        if (_suppressUi || _curGroup == null) return;
-        _curGroup.Third.UseTargetWindow = ChkThirdWindow.IsChecked == true;
-        SaveCurrentGroup();
-    }
-
-    private void TxtThirdWindow_Changed(object s, TextChangedEventArgs e)
-    {
-        if (_suppressUi || _curGroup == null) return;
-        _curGroup.Third.TargetWindowTitle = TxtThirdWindow.Text;
-        RefreshPidLabels();
-        SaveCurrentGroup();
-    }
-
-    private void BtnThirdPick_Click(object s, RoutedEventArgs e) => PickWindow(2);
-
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  WINDOW PICKER
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void PickWindow(int laneIndex)
+    // ═══════════════════════════════════════════════════════════
+    //  PIXEL GUARD shared panel
+    // ═══════════════════════════════════════════════════════════
+    private void CmbGuardSource_Changed(object s, SelectionChangedEventArgs e)
     {
         if (_curGroup == null) return;
-        var dlg = new WindowPickerDialog { Owner = this };
-        if (dlg.ShowDialog() != true || dlg.SelectedHwnd == IntPtr.Zero) return;
-
-        var lane  = _curGroup.Lanes[laneIndex];
-        var title = dlg.SelectedTitle ?? "";
-        var hwnd  = dlg.SelectedHwnd;
-
-        // compute instance (skip chain of prior lanes)
-        var claimed = new HashSet<IntPtr>();
-        for (int i = 0; i < laneIndex; i++)
-        {
-            var ph = Win32.ResolveWindowHwnd(
-                _curGroup.Lanes[i].TargetWindowTitle,
-                _curGroup.Lanes[i].UseTargetWindow ? _curGroup.Lanes[i].TargetWindowInstance : -1,
-                claimed);
-            if (ph != IntPtr.Zero) claimed.Add(ph);
-        }
-        var allMatches = Win32.FindWindowsByTitle(title).Select(x => x.hwnd).ToList();
-        int instance   = allMatches.IndexOf(hwnd);
-        if (instance < 0) instance = 0;
-
-        lane.TargetWindowTitle    = title;
-        lane.TargetWindowInstance = instance;
-        lane.UseTargetWindow      = true;
-
-        _suppressUi = true;
-        switch (laneIndex)
-        {
-            case 0: TxtPrimaryWindow.Text = title; ChkPrimaryWindow.IsChecked = true; break;
-            case 1: TxtSecWindow.Text     = title; ChkSecWindow.IsChecked     = true; break;
-            case 2: TxtThirdWindow.Text   = title; ChkThirdWindow.IsChecked   = true; break;
-        }
-        _suppressUi = false;
-        RefreshPidLabels();
+        _curGroup.SharedGuardLane = CmbGuardSource.SelectedIndex;
         SaveCurrentGroup();
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  GROUP FIELDS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void ChkGroupEnabled_Changed(object s, RoutedEventArgs e)
+    private void ChkGuardUser_Changed(object s, RoutedEventArgs e)
     {
-        if (_suppressUi || _curGroup == null) return;
-        _curGroup.Enabled = ChkGroupEnabled.IsChecked == true;
+        if (_curGroup == null) return;
+        int bits = 0;
+        if (ChkGuardPri.IsChecked == true) bits |= 0b001;
+        if (ChkGuardSec.IsChecked == true) bits |= 0b010;
+        if (ChkGuardThi.IsChecked == true) bits |= 0b100;
+        _curGroup.SharedGuardUsers = bits;
         SaveCurrentGroup();
     }
 
-    private void TxtRepeat_Changed(object s, TextChangedEventArgs e)
+    // ═══════════════════════════════════════════════════════════
+    //  GUARD MACROS panel
+    // ═══════════════════════════════════════════════════════════
+    private void BtnGuardAdd_Click(object s, RoutedEventArgs e)
     {
-        if (_suppressUi || _curGroup == null) return;
-        if (int.TryParse(TxtRepeat.Text, out int v))
-            _curGroup.Primary.RepeatCount = Math.Max(0, v);
-        SaveCurrentGroup();
+        string? name = InputDialog.Prompt(this, "New Guard Macro", "Name:", $"Guard {_guardMacros.Count + 1}");
+        if (string.IsNullOrEmpty(name)) return;
+        var gm = new Macro { Name = name };
+        _guardMacros.Add(gm);
+        _storage.SaveGuardMacros(_guardMacros);
+        RefreshGuardMacroList();
     }
 
-    private void TxtSpeed_Changed(object s, TextChangedEventArgs e)
+    private void BtnGuardDel_Click(object s, RoutedEventArgs e)
     {
-        if (_suppressUi || _curGroup == null) return;
-        if (double.TryParse(TxtSpeed.Text, System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture, out double v))
-        {
-            double spd = Math.Max(0.01, v);
-            foreach (var lane in _curGroup.Lanes) lane.SpeedMultiplier = spd;
-        }
-        SaveCurrentGroup();
+        int idx = GuardMacroList.SelectedIndex;
+        if (idx < 0 || idx >= _guardMacros.Count) return;
+        var gm = _guardMacros[idx];
+        if (MessageBox.Show($"Delete guard macro '{gm.Name}'?", "Confirm",
+            MessageBoxButton.YesNo) != MessageBoxResult.Yes) return;
+        _guardMacros.RemoveAt(idx);
+        _storage.SaveGuardMacros(_guardMacros);
+        RefreshGuardMacroList();
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  PID LABELS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void RefreshPidLabels()
+    private void BtnGuardRec_Click(object s, RoutedEventArgs e)
     {
-        if (_curGroup == null)
-        {
-            LblPrimaryPid.Text = LblSecPid.Text = LblThirdPid.Text = "";
-            return;
-        }
-
-        var claimed = new HashSet<IntPtr>();
-
-        LblPrimaryPid.Text = BuildPidText(_curGroup.Primary, claimed);
-        if (_curGroup.Primary.UseTargetWindow)
-        {
-            var h = Win32.ResolveWindowHwnd(_curGroup.Primary.TargetWindowTitle,
-                        _curGroup.Primary.TargetWindowInstance, null);
-            if (h != IntPtr.Zero) claimed.Add(h);
-        }
-
-        LblSecPid.Text = BuildPidText(_curGroup.Secondary, claimed);
-        if (_curGroup.Secondary.UseTargetWindow)
-        {
-            var h = Win32.ResolveWindowHwnd(_curGroup.Secondary.TargetWindowTitle,
-                        _curGroup.Secondary.TargetWindowInstance, claimed);
-            if (h != IntPtr.Zero) claimed.Add(h);
-        }
-
-        LblThirdPid.Text = BuildPidText(_curGroup.Third, claimed);
+        int idx = GuardMacroList.SelectedIndex;
+        if (idx < 0 || idx >= _guardMacros.Count) { MessageBox.Show("Select a guard macro first."); return; }
+        var gm = _guardMacros[idx];
+        gm.Events.Clear();
+        Log($"Recording guard macro '{gm.Name}'…");
+        TtsService.Speak($"Recording guard {gm.Name}");
+        _recorder = new RecorderService(true, IntPtr.Zero);
+        _recorder.EventCaptured += ev => Dispatcher.InvokeAsync(() => gm.Events.Add(ev));
+        _recorder.Start();
     }
 
-    private static string BuildPidText(Macro lane, HashSet<IntPtr> claimed)
+    private void BtnGuardStop_Click(object s, RoutedEventArgs e)
     {
-        if (!lane.UseTargetWindow || string.IsNullOrEmpty(lane.TargetWindowTitle))
-            return "";
-
-        var hwnd = Win32.ResolveWindowHwnd(lane.TargetWindowTitle, lane.TargetWindowInstance, claimed);
-        if (hwnd == IntPtr.Zero)
-        {
-            string tag = lane.TargetWindowInstance > 0 ? $" (#{lane.TargetWindowInstance + 1})" : "";
-            return $"âš  Not found{tag}";
-        }
-
-        Win32.GetWindowThreadProcessId(hwnd, out uint pid);
-        string instTag = lane.TargetWindowInstance > 0 ? $"  #{lane.TargetWindowInstance + 1}" : "";
-        return $"PID {pid}  HWND 0x{hwnd:X8}{instTag}";
+        _recorder?.Stop();
+        _recorder = null;
+        _storage.SaveGuardMacros(_guardMacros);
+        RefreshGuardMacroList();
+        TtsService.Speak("Guard recording complete");
+        Log("Guard macro recording stopped");
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    private void BtnGuardView_Click(object s, RoutedEventArgs e)
+    {
+        int idx = GuardMacroList.SelectedIndex;
+        if (idx < 0 || idx >= _guardMacros.Count) return;
+        var gm = _guardMacros[idx];
+        var w = new Window
+        {
+            Title = $"Events — {gm.Name}", Width = 600, Height = 400,
+            Owner = this,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner
+        };
+        var grid = new DataGrid { ItemsSource = gm.Events, AutoGenerateColumns = false };
+        grid.Columns.Add(new DataGridTextColumn { Header = "Time (s)", Binding = new System.Windows.Data.Binding("Timestamp") { StringFormat = "F4" }, Width = 80 });
+        grid.Columns.Add(new DataGridTextColumn { Header = "Type",     Binding = new System.Windows.Data.Binding("EventType"), Width = 120 });
+        grid.Columns.Add(new DataGridTextColumn { Header = "Data",     Binding = new System.Windows.Data.Binding("DataSummary"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+        w.Content = grid;
+        w.ShowDialog();
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  TOP BAR: log/feedback/tray/update
+    // ═══════════════════════════════════════════════════════════
+    private void BtnDiagLog_Click(object s, RoutedEventArgs e) =>
+        new LogViewerDialog("Diag Log", _storage.DiagLogPath) { Owner = this }.Show();
+
+    private void BtnCrashLog_Click(object s, RoutedEventArgs e) =>
+        new LogViewerDialog("Crash Log", _storage.CrashLogPath) { Owner = this }.Show();
+
+    private void BtnFeedback_Click(object s, RoutedEventArgs e) =>
+        new FeedbackDialog(_storage.DiagLogPath, GetVersion()) { Owner = this }.ShowDialog();
+
+    private void BtnTray_Click(object s, RoutedEventArgs e) => _tray?.HideToTray();
+
+    private void ChkAutoUpdate_Changed(object s, RoutedEventArgs e)
+    {
+        _settings.AutoUpdate = ChkAutoUpdate.IsChecked == true;
+        _storage.SaveSettings(_settings);
+    }
+
+    private async void BtnCheckUpdate_Click(object s, RoutedEventArgs e)
+    {
+        Log("Checking for update…");
+        var (newer, newVer, log) = await _updater.CheckAsync();
+        if (newer) PromptUpdate(newVer, log);
+        else        Log("No update available.");
+    }
+
+    private void PromptUpdate(string newVer, string changelog)
+    {
+        var msg = $"New version {newVer} is available.\n\n{changelog}\n\nUpdate now?";
+        if (MessageBox.Show(msg, "Update Available", MessageBoxButton.YesNo,
+            MessageBoxImage.Information) == MessageBoxResult.Yes)
+            _ = _updater.DownloadAndApplyAsync();
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  PLAY CHAIN + STOP ALL BUTTONS
+    // ═══════════════════════════════════════════════════════════
+    private void BtnPlayChain_Click(object s, RoutedEventArgs e) => PlayChain();
+    private void BtnStopAll_Click(object s, RoutedEventArgs e)   => StopAll();
+
+    // ═══════════════════════════════════════════════════════════
     //  RUNS LABEL
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     private void RefreshRunsLabel()
     {
         int total = _groups.Sum(g => g.Lanes.Sum(l => l.RunCount));
         RunsLabel.Text  = $"Runs: {total}";
         ExecLabel.Text  = $"Executions: {total}";
+        RunsInline.Text = total == 0 ? "  Runs: (none yet)" : $"  Runs: {total}";
     }
 
     private void RunsLabel_RightClick(object s, MouseButtonEventArgs e) => ShowResetMenu(s);
@@ -617,19 +668,19 @@ public partial class MainWindow : Window
             };
             ctx.Items.Add(item);
         }
-        if (sender is FrameworkElement fe)
-            ctx.PlacementTarget = fe;
+        if (sender is FrameworkElement fe) ctx.PlacementTarget = fe;
         ctx.IsOpen = true;
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     //  TOAST
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     private void SwitchLaneWithToast(int laneIndex)
     {
         LaneTabs.SelectedIndex = laneIndex;
         string name = laneIndex switch { 1 => "Secondary", 2 => "Third", _ => "Primary" };
-        ShowToast($"ðŸŽ™  {name} ready â€” press  Ctrl+R  to record\nThis lane has no events yet.", 3000);
+        string recKey = Shortcuts.Get(_shortcutsCfg, "toggle_record");
+        ShowToast($"🎙  {name} ready — press  {recKey}  to record\nThis lane has no events yet.", 3000);
     }
 
     private void ShowToast(string message, int durationMs)
@@ -637,54 +688,39 @@ public partial class MainWindow : Window
         ToastText.Text      = message;
         ToastBorder.Opacity = 0;
         ToastBorder.Visibility = Visibility.Visible;
-
-        var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(300));
-        ToastBorder.BeginAnimation(OpacityProperty, fadeIn);
-
+        ToastBorder.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(300)));
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(durationMs) };
         timer.Tick += (_, _) =>
         {
             timer.Stop();
-            var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(400));
-            fadeOut.Completed += (_, _) => ToastBorder.Visibility = Visibility.Collapsed;
-            ToastBorder.BeginAnimation(OpacityProperty, fadeOut);
+            var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(400));
+            fade.Completed += (_, _) => ToastBorder.Visibility = Visibility.Collapsed;
+            ToastBorder.BeginAnimation(OpacityProperty, fade);
         };
         timer.Start();
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     //  ACTIVITY LOG
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     private void Log(string msg)
     {
         string line = $"[{DateTime.Now:HH:mm:ss}]  {msg}";
         Dispatcher.InvokeAsync(() =>
         {
             ActivityLog.Items.Add(line);
+            if (ActivityLog.Items.Count > 500) ActivityLog.Items.RemoveAt(0);
             ActivityLog.ScrollIntoView(line);
         });
+        _storage.DiagLog(msg);
     }
 
     private void BtnClearLog_Click(object s, RoutedEventArgs e) => ActivityLog.Items.Clear();
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  TOP BAR BUTTONS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void BtnRecord_Click(object s, RoutedEventArgs e) => ToggleRecord();
-    private void BtnPlay_Click(object s, RoutedEventArgs e)   => TogglePlay();
-    private void BtnStop_Click(object s, RoutedEventArgs e)   => StopRecord_And_Play();
-
-    private void BtnSettings_Click(object s, RoutedEventArgs e)
-    {
-        MessageBox.Show("Settings dialog coming soon.", "Settings",
-            MessageBoxButton.OK, MessageBoxImage.Information);
-    }
-
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════
     //  HELPERS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    private void SetStatus(string msg) => StatusLabel.Text = msg;
-
+    // ═══════════════════════════════════════════════════════════
     private static string GetVersion()
     {
         try
@@ -700,12 +736,15 @@ public partial class MainWindow : Window
         catch { }
         return "1.0.0";
     }
+}
 
-    private static string? InputDialog(string title, string prompt, string? defaultValue = "")
+internal static class InputDialog
+{
+    public static string? Prompt(Window owner, string title, string prompt, string? defaultValue = "")
     {
         var dlg  = new Window
         {
-            Title = title, Width = 360, Height = 140,
+            Title = title, Width = 360, Height = 140, Owner = owner,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ResizeMode = ResizeMode.NoResize
         };

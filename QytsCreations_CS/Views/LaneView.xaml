@@ -1,0 +1,215 @@
+<UserControl x:Class="QytCroRec.Views.LaneView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>  <!-- lane header bar -->
+      <RowDefinition Height="*"/>     <!-- sub-tabs -->
+    </Grid.RowDefinitions>
+
+    <!-- Lane header bar: name + idle/running + per-lane Record/Play/Stop -->
+    <Border Grid.Row="0" Background="{StaticResource Surface0Brush}"
+            BorderBrush="{StaticResource Surface1Brush}" BorderThickness="0,0,0,1"
+            Padding="12,8">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+
+        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock x:Name="LaneNameLabel" Text="Lane"
+                     FontSize="15" FontWeight="SemiBold"
+                     Foreground="{StaticResource TextBrush}"/>
+          <TextBlock x:Name="LaneStatusLabel" Text="Idle"
+                     FontSize="12" Margin="10,0,0,0"
+                     Foreground="{StaticResource Subtext0Brush}" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <StackPanel Grid.Column="1" Orientation="Horizontal">
+          <Button x:Name="BtnRecord" Content="⏺  Record"
+                  Style="{StaticResource BtnRecord}" Margin="4,0" Click="BtnRecord_Click"/>
+          <Button x:Name="BtnPlay" Content="▶  Play"
+                  Style="{StaticResource BtnPlay}" Margin="4,0" Click="BtnPlay_Click"/>
+          <Button x:Name="BtnStop" Content="■  Stop"
+                  Style="{StaticResource BtnStop}" Margin="4,0" Click="BtnStop_Click"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Sub-tabs: Settings / Events / Guard -->
+    <TabControl Grid.Row="1">
+
+      <!-- SETTINGS -->
+      <TabItem Header="⚙ Settings">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <Grid Margin="14">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="120"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Name -->
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Name:" VerticalAlignment="Center"
+                       Margin="0,0,0,8"/>
+            <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtName" Margin="0,0,0,8"
+                     TextChanged="TxtName_Changed"/>
+
+            <!-- Repeat / Speed / Record-mouse -->
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Repeat:" VerticalAlignment="Center"
+                       Margin="0,0,0,8"/>
+            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,8">
+              <TextBox x:Name="TxtRepeat" Width="100" Text="1" TextChanged="TxtRepeat_Changed"
+                       ToolTip="0 = infinite"/>
+              <TextBlock Text="Speed×:" VerticalAlignment="Center" Margin="14,0,6,0"
+                         Foreground="{StaticResource Subtext0Brush}"/>
+              <TextBox x:Name="TxtSpeed" Width="80" Text="1.0" TextChanged="TxtSpeed_Changed"/>
+              <CheckBox x:Name="ChkRecMove" Content="Record Mouse Moves"
+                        VerticalAlignment="Center" Margin="20,0,0,0"
+                        Checked="ChkRecMove_Changed" Unchecked="ChkRecMove_Changed"/>
+            </StackPanel>
+
+            <!-- Force target window -->
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="" />
+            <CheckBox Grid.Row="2" Grid.Column="1" x:Name="ChkUseTargetWindow"
+                      Content="Force Target Window"
+                      Margin="0,0,0,8"
+                      Checked="ChkUseTargetWindow_Changed" Unchecked="ChkUseTargetWindow_Changed"/>
+
+            <!-- Window title + pickers -->
+            <TextBlock Grid.Row="3" Grid.Column="0" Text="Window:" VerticalAlignment="Center"
+                       Margin="0,0,0,8"/>
+            <Grid Grid.Row="3" Grid.Column="1" Margin="0,0,0,8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <TextBox Grid.Column="0" x:Name="TxtWindowTitle" TextChanged="TxtWindowTitle_Changed"/>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="6,0,0,0">
+                <Button Content="Pick…" Width="60" Margin="2,0" Click="BtnPick_Click"/>
+                <Button Content="Capture 3s" Width="80" Margin="2,0" Click="BtnCapture3s_Click"/>
+                <Button Content="🎯 Drag" Width="70" Margin="2,0" Click="BtnDrag_Click"/>
+              </StackPanel>
+            </Grid>
+
+            <!-- PID status -->
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="" />
+            <TextBlock Grid.Row="4" Grid.Column="1" x:Name="LblPidStatus"
+                       FontFamily="Consolas" FontSize="11" Margin="0,0,0,8"
+                       Foreground="{StaticResource Subtext0Brush}"/>
+
+            <!-- Backend dropdown -->
+            <TextBlock Grid.Row="5" Grid.Column="0" Text="Backend:" VerticalAlignment="Center"
+                       Margin="0,0,0,8"/>
+            <Grid Grid.Row="5" Grid.Column="1" Margin="0,0,0,8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <ComboBox Grid.Column="0" x:Name="CmbBackend" SelectionChanged="CmbBackend_Changed">
+                <ComboBoxItem Content="Auto (best available)" Tag="auto"/>
+                <ComboBoxItem Content="SendInput (system-wide)" Tag="sendinput"/>
+                <ComboBoxItem Content="PostMessage (background)" Tag="postmessage"/>
+                <ComboBoxItem Content="API Hook (Detours) — DirectInput/RawInput games" Tag="detours"/>
+              </ComboBox>
+              <Button Grid.Column="1" Content="Hook Status" Width="100" Margin="6,0,0,0"
+                      Click="BtnHookStatus_Click"/>
+            </Grid>
+
+            <!-- Lane enabled toggle (secondary/third only) -->
+            <TextBlock Grid.Row="6" Grid.Column="0" Text=""/>
+            <CheckBox Grid.Row="6" Grid.Column="1" x:Name="ChkLaneEnabled"
+                      Content="Lane Enabled (plays in chain)"
+                      Margin="0,4,0,0"
+                      Checked="ChkLaneEnabled_Changed" Unchecked="ChkLaneEnabled_Changed"/>
+          </Grid>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- EVENTS -->
+      <TabItem Header="📋 Events">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+          <Border Grid.Row="0" Background="{StaticResource Surface0Brush}" Padding="10,6">
+            <StackPanel Orientation="Horizontal">
+              <Button Content="Clear All" Margin="0,0,8,0" Click="BtnClearAll_Click"/>
+              <Button Content="Delete Selected" Click="BtnDeleteSelected_Click"/>
+              <TextBlock x:Name="EventCount" VerticalAlignment="Center" Margin="14,0,0,0"
+                         Foreground="{StaticResource Subtext0Brush}" FontSize="11"
+                         Text="0 events"/>
+            </StackPanel>
+          </Border>
+          <DataGrid x:Name="EventGrid" Grid.Row="1" KeyDown="EventGrid_KeyDown">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Time (s)" Binding="{Binding Timestamp, StringFormat=F4}" Width="90"/>
+              <DataGridTextColumn Header="Type"     Binding="{Binding EventType}" Width="120"/>
+              <DataGridTextColumn Header="Data"     Binding="{Binding DataSummary}" Width="*"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </Grid>
+      </TabItem>
+
+      <!-- GUARD -->
+      <TabItem Header="🛡 Guard">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="14">
+            <CheckBox x:Name="ChkGuardEnabled" Content="Enable Pixel Guard on this lane"
+                      FontWeight="SemiBold" Margin="0,0,0,12"
+                      Checked="ChkGuardEnabled_Changed" Unchecked="ChkGuardEnabled_Changed"/>
+
+            <TextBlock Text="Capture region (% of target window):" Margin="0,0,0,4"
+                       Foreground="{StaticResource Subtext0Brush}"/>
+            <Grid Margin="0,0,0,12">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="50"/>
+                <ColumnDefinition Width="80"/>
+                <ColumnDefinition Width="50"/>
+                <ColumnDefinition Width="80"/>
+                <ColumnDefinition Width="50"/>
+                <ColumnDefinition Width="80"/>
+                <ColumnDefinition Width="50"/>
+                <ColumnDefinition Width="80"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <TextBlock Grid.Column="0" Text="X:" VerticalAlignment="Center"/>
+              <TextBox    Grid.Column="1" x:Name="TxtGuardX" Text="0.75" TextChanged="TxtGuardRegion_Changed"/>
+              <TextBlock Grid.Column="2" Text="Y:" VerticalAlignment="Center" Margin="6,0,0,0"/>
+              <TextBox    Grid.Column="3" x:Name="TxtGuardY" Text="0.02" TextChanged="TxtGuardRegion_Changed"/>
+              <TextBlock Grid.Column="4" Text="W:" VerticalAlignment="Center" Margin="6,0,0,0"/>
+              <TextBox    Grid.Column="5" x:Name="TxtGuardW" Text="0.24" TextChanged="TxtGuardRegion_Changed"/>
+              <TextBlock Grid.Column="6" Text="H:" VerticalAlignment="Center" Margin="6,0,0,0"/>
+              <TextBox    Grid.Column="7" x:Name="TxtGuardH" Text="0.06" TextChanged="TxtGuardRegion_Changed"/>
+            </Grid>
+
+            <TextBlock Text="Correction key (sent when red detected):" Margin="0,0,0,4"
+                       Foreground="{StaticResource Subtext0Brush}"/>
+            <TextBox x:Name="TxtGuardCorrectionKey" Text="b" Width="100"
+                     HorizontalAlignment="Left" Margin="0,0,0,12"
+                     TextChanged="TxtGuardCorrectionKey_Changed"/>
+
+            <TextBlock Text="Correction macro (overrides key if set):" Margin="0,0,0,4"
+                       Foreground="{StaticResource Subtext0Brush}"/>
+            <ComboBox x:Name="CmbGuardCorrectionMacro" Width="240"
+                      HorizontalAlignment="Left"
+                      SelectionChanged="CmbGuardCorrectionMacro_Changed"/>
+
+            <Button Content="🔍 Test Detection" Margin="0,18,0,0" HorizontalAlignment="Left"
+                    Padding="14,7" Click="BtnGuardTest_Click"/>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+    </TabControl>
+  </Grid>
+</UserControl>

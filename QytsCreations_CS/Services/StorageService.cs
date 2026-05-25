@@ -6,18 +6,29 @@ namespace QytCroRec.Services;
 
 public class StorageService
 {
-    private readonly string _dir;
+    public readonly string Dir;
     private readonly string _groupsPath;
     private readonly string _shortcutsPath;
+    private readonly string _guardMacrosPath;
+    private readonly string _settingsPath;
+    private readonly string _diagLogPath;
+    private readonly string _crashLogPath;
+
+    public string DiagLogPath  => _diagLogPath;
+    public string CrashLogPath => _crashLogPath;
 
     public StorageService()
     {
-        _dir = Path.Combine(
+        Dir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".macro_recorder");
-        Directory.CreateDirectory(_dir);
-        _groupsPath   = Path.Combine(_dir, "groups.json");
-        _shortcutsPath = Path.Combine(_dir, "shortcuts.json");
+        Directory.CreateDirectory(Dir);
+        _groupsPath      = Path.Combine(Dir, "groups.json");
+        _shortcutsPath   = Path.Combine(Dir, "shortcuts.json");
+        _guardMacrosPath = Path.Combine(Dir, "guard_macros.json");
+        _settingsPath    = Path.Combine(Dir, "settings_cs.json");  // CS-specific
+        _diagLogPath     = Path.Combine(Dir, "diag.log");
+        _crashLogPath    = Path.Combine(Dir, "crash.log");
     }
 
     // ── Groups ────────────────────────────────────────────────────────────────
@@ -34,7 +45,7 @@ public class StorageService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[storage] LoadGroups error: {ex.Message}");
+            DiagLog($"LoadGroups error: {ex.Message}");
             return new();
         }
     }
@@ -53,7 +64,7 @@ public class StorageService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[storage] SaveGroups error: {ex.Message}");
+            DiagLog($"SaveGroups error: {ex.Message}");
         }
     }
 
@@ -78,4 +89,94 @@ public class StorageService
         File.WriteAllText(_shortcutsPath,
             JsonConvert.SerializeObject(shortcuts, Formatting.Indented));
     }
+
+    // ── Guard Macros ──────────────────────────────────────────────────────────
+
+    public List<Macro> LoadGuardMacros()
+    {
+        if (!File.Exists(_guardMacrosPath)) return new();
+        try
+        {
+            var json = File.ReadAllText(_guardMacrosPath);
+            return JsonConvert.DeserializeObject<List<Macro>>(json) ?? new();
+        }
+        catch (Exception ex)
+        {
+            DiagLog($"LoadGuardMacros error: {ex.Message}");
+            return new();
+        }
+    }
+
+    public void SaveGuardMacros(IEnumerable<Macro> macros)
+    {
+        var tmp = _guardMacrosPath + ".tmp";
+        try
+        {
+            var json = JsonConvert.SerializeObject(macros, Formatting.Indented);
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, _guardMacrosPath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            DiagLog($"SaveGuardMacros error: {ex.Message}");
+        }
+    }
+
+    // ── App settings (C#-specific) ────────────────────────────────────────────
+
+    public AppSettings LoadSettings()
+    {
+        if (!File.Exists(_settingsPath)) return new();
+        try
+        {
+            return JsonConvert.DeserializeObject<AppSettings>(File.ReadAllText(_settingsPath))
+                ?? new();
+        }
+        catch { return new(); }
+    }
+
+    public void SaveSettings(AppSettings s)
+    {
+        try { File.WriteAllText(_settingsPath, JsonConvert.SerializeObject(s, Formatting.Indented)); }
+        catch (Exception ex) { DiagLog($"SaveSettings error: {ex.Message}"); }
+    }
+
+    // ── Diag / Crash logs ─────────────────────────────────────────────────────
+
+    private static readonly object _logLock = new();
+    public void DiagLog(string msg)
+    {
+        try
+        {
+            lock (_logLock)
+            {
+                File.AppendAllText(_diagLogPath,
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}{Environment.NewLine}");
+            }
+        }
+        catch { }
+    }
+
+    public void CrashLog(string msg)
+    {
+        try
+        {
+            lock (_logLock)
+            {
+                File.AppendAllText(_crashLogPath,
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}{Environment.NewLine}");
+            }
+        }
+        catch { }
+    }
+}
+
+public class AppSettings
+{
+    public bool   AutoUpdate         { get; set; } = true;
+    public bool   MinimizeToTray     { get; set; } = false;
+    public bool   StartMinimized     { get; set; } = false;
+    public bool   TtsEnabled         { get; set; } = true;
+    public bool   RecordMouseMove    { get; set; } = true;
+    public string PreferredBackend   { get; set; } = "auto";
 }

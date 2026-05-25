@@ -2638,49 +2638,61 @@ QPushButton:pressed { background: rgba(24,24,37,0.95); }
 QPushButton:disabled { background: rgba(30,30,46,0.45); color: rgba(140,145,170,0.50);
                         border-color: rgba(69,71,90,0.25); }
 
-/* ── RECORD button — vivid red, always visible ───────────────────────────── */
+/* ── RECORD button — vivid pulsing red, premium pop ──────────────────────── */
 QPushButton#btn_record {
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-        stop:0 #ff4e7e, stop:1 #c9284d);
-    color: #ffffff; border: 2px solid #ff6b9a;
-    border-radius: 7px; font-weight: bold; font-size: 13px;
-    padding: 7px 18px;
+        stop:0 #ff5a8a, stop:0.5 #ff3060, stop:1 #b81a45);
+    color: #ffffff; border: 2.5px solid #ff85b0;
+    border-radius: 9px; font-weight: 900; font-size: 14px;
+    padding: 9px 22px; letter-spacing: 0.5px;
+    min-width: 110px; min-height: 36px;
 }
-QPushButton#btn_record:hover  { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-    stop:0 #ff6f96, stop:1 #e03060); border-color: #ffaac8; }
-QPushButton#btn_record:pressed { background: #a01f3a; }
+QPushButton#btn_record:hover  {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #ff80a8, stop:0.5 #ff4a78, stop:1 #d02050);
+    border: 2.5px solid #ffc0d8;
+}
+QPushButton#btn_record:pressed { background: #8e1830; border-color: #ff4a78; }
 QPushButton#btn_record:disabled {
     background: rgba(180,40,70,0.28); color: rgba(255,150,180,0.45);
     border: 1px solid rgba(200,60,90,0.25);
 }
 
-/* ── PLAY button — gold background, white text, always legible ───────────── */
+/* ── PLAY button — gold/amber glow, super-visible ─────────────────────────── */
 QPushButton#btn_play {
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-        stop:0 #f5c400, stop:1 #c98e00);
-    color: #ffffff; border: 2px solid #ffd740;
-    border-radius: 7px; font-weight: bold; font-size: 14px;
-    padding: 7px 18px; letter-spacing: 0.5px;
+        stop:0 #ffd744, stop:0.5 #f0b820, stop:1 #b07000);
+    color: #1e1e2e; border: 2.5px solid #ffe070;
+    border-radius: 9px; font-weight: 900; font-size: 14px;
+    padding: 9px 22px; letter-spacing: 0.5px;
+    min-width: 110px; min-height: 36px;
 }
-QPushButton#btn_play:hover  { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-    stop:0 #ffd740, stop:1 #e0a000); border-color: #ffe880; color: #ffffff; }
-QPushButton#btn_play:pressed { background: #a07000; color: #ffffff; }
+QPushButton#btn_play:hover  {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #ffe680, stop:0.5 #ffd040, stop:1 #d09000);
+    border: 2.5px solid #fff0a0; color: #1e1e2e;
+}
+QPushButton#btn_play:pressed { background: #905a00; color: #ffffff; }
 QPushButton#btn_play:disabled {
     background: rgba(180,120,0,0.28); color: rgba(255,220,100,0.45);
     border: 1px solid rgba(200,150,0,0.22);
 }
 
-/* ── STOP button — bright red, always visible ────────────────────────────── */
+/* ── STOP button — fiery red, can't miss it ──────────────────────────────── */
 QPushButton#btn_stop {
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-        stop:0 #ff4444, stop:1 #cc0000);
-    color: #ffffff; border: 2px solid #ff6666;
-    border-radius: 7px; font-weight: bold; font-size: 13px;
-    padding: 7px 18px;
+        stop:0 #ff5050, stop:0.5 #e02020, stop:1 #a00000);
+    color: #ffffff; border: 2.5px solid #ff8080;
+    border-radius: 9px; font-weight: 900; font-size: 14px;
+    padding: 9px 22px; letter-spacing: 0.5px;
+    min-width: 110px; min-height: 36px;
 }
-QPushButton#btn_stop:hover  { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-    stop:0 #ff6666, stop:1 #dd1111); border-color: #ff9999; }
-QPushButton#btn_stop:pressed { background: #880000; }
+QPushButton#btn_stop:hover  {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #ff7070, stop:0.5 #ff3030, stop:1 #c00000);
+    border: 2.5px solid #ffb0b0;
+}
+QPushButton#btn_stop:pressed { background: #700000; border-color: #ff3030; }
 QPushButton#btn_stop:disabled {
     background: rgba(200,30,30,0.22); color: rgba(255,120,120,0.40);
     border: 1px solid rgba(220,50,50,0.20);

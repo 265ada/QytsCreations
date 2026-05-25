@@ -4,88 +4,251 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
-        Title="QytCroRec" Height="720" Width="1100"
-        MinHeight="560" MinWidth="800"
+        Title="QytCroRec" Height="780" Width="1280"
+        MinHeight="640" MinWidth="1000"
         Background="{StaticResource BaseBrush}"
         WindowStartupLocation="CenterScreen">
 
   <Window.Resources>
-    <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-      <Setter Property="Background" Value="{StaticResource BlueBrush}"/>
-      <Setter Property="Foreground" Value="{StaticResource CrustBrush}"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
+    <!-- BUTTON STYLES — make Record / Play / Stop POP -->
+    <Style x:Key="BtnRecord" TargetType="Button">
+      <Setter Property="Background">
+        <Setter.Value>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Offset="0" Color="#f38ba8"/>
+            <GradientStop Offset="1" Color="#c8395f"/>
+          </LinearGradientBrush>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="BorderBrush" Value="#ffa3bb"/>
+      <Setter Property="BorderThickness" Value="1.5"/>
+      <Setter Property="Padding" Value="14,7"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="7" Padding="{TemplateBinding Padding}">
+              <Border.Effect>
+                <DropShadowEffect Color="#f38ba8" BlurRadius="8" ShadowDepth="0" Opacity="0.4"/>
+              </Border.Effect>
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background">
+                  <Setter.Value>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                      <GradientStop Offset="0" Color="#ff9bb8"/>
+                      <GradientStop Offset="1" Color="#d8456f"/>
+                    </LinearGradientBrush>
+                  </Setter.Value>
+                </Setter>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Opacity" Value="0.85"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
+
+    <Style x:Key="BtnPlay" TargetType="Button">
+      <Setter Property="Background">
+        <Setter.Value>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Offset="0" Color="#f9e2af"/>
+            <GradientStop Offset="1" Color="#d49832"/>
+          </LinearGradientBrush>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="Foreground" Value="#1e1e2e"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="BorderBrush" Value="#fff2c8"/>
+      <Setter Property="BorderThickness" Value="1.5"/>
+      <Setter Property="Padding" Value="14,7"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="7" Padding="{TemplateBinding Padding}">
+              <Border.Effect>
+                <DropShadowEffect Color="#f9e2af" BlurRadius="8" ShadowDepth="0" Opacity="0.4"/>
+              </Border.Effect>
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Opacity" Value="1"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Opacity" Value="0.85"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="BtnStop" TargetType="Button">
+      <Setter Property="Background">
+        <Setter.Value>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Offset="0" Color="#4a4a5a"/>
+            <GradientStop Offset="1" Color="#2a2a3a"/>
+          </LinearGradientBrush>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="Foreground" Value="#cdd6f4"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="BorderBrush" Value="#6a6a7a"/>
+      <Setter Property="BorderThickness" Value="1.5"/>
+      <Setter Property="Padding" Value="14,7"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="7" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="BorderBrush" Value="#cdd6f4"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Opacity" Value="0.85"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="ChainPlayButton" TargetType="Button">
+      <Setter Property="Background">
+        <Setter.Value>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Offset="0" Color="#f9e2af"/>
+            <GradientStop Offset="1" Color="#fab387"/>
+          </LinearGradientBrush>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="Foreground" Value="#1e1e2e"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Padding" Value="18,10"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border Background="{TemplateBinding Background}"
+                    CornerRadius="8" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Opacity" Value="0.92"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-      <Setter Property="Background" Value="{StaticResource RedBrush}"/>
-      <Setter Property="Foreground" Value="{StaticResource CrustBrush}"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
-    </Style>
-    <Style x:Key="GreenButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-      <Setter Property="Background" Value="{StaticResource GreenBrush}"/>
-      <Setter Property="Foreground" Value="{StaticResource CrustBrush}"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Background" Value="#5a2536"/>
+      <Setter Property="Foreground" Value="#f5b3c5"/>
+      <Setter Property="BorderBrush" Value="#f38ba8"/>
     </Style>
   </Window.Resources>
 
   <Grid>
     <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="*"/>
-      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>  <!-- Top bar -->
+      <RowDefinition Height="*"/>     <!-- Main content -->
+      <RowDefinition Height="Auto"/>  <!-- Bottom Chain/Stop bar -->
+      <RowDefinition Height="Auto"/>  <!-- Status bar -->
     </Grid.RowDefinitions>
 
-    <!-- TOP BAR -->
+    <!-- ═══ TOP BAR ═══ -->
     <Border Grid.Row="0" Background="{StaticResource CrustBrush}"
             BorderBrush="{StaticResource Surface0Brush}" BorderThickness="0,0,0,1"
-            Padding="12,8">
+            Padding="10,6">
       <Grid>
         <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
 
+        <!-- Left: group buttons -->
         <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-          <TextBlock Text="⬡ QytCroRec" FontSize="16" FontWeight="Bold"
-                     Foreground="{StaticResource BlueBrush}" VerticalAlignment="Center"/>
+          <Button Content="＋ New Group" Width="110" Margin="2,0" Click="BtnAddGroup_Click"/>
+          <Button Content="⎘ Duplicate"  Width="100" Margin="2,0" Click="BtnDuplicate_Click"/>
+          <Button Content="✕ Delete"     Width="80"  Margin="2,0"
+                  Style="{StaticResource DangerButton}" Click="BtnDelete_Click"/>
+        </StackPanel>
+
+        <!-- Center-left: auto-update controls -->
+        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0,0,0">
+          <CheckBox x:Name="ChkAutoUpdate" Content="Auto-Update" VerticalAlignment="Center"
+                    Checked="ChkAutoUpdate_Changed" Unchecked="ChkAutoUpdate_Changed"/>
+          <Button Content="Check Now" Margin="8,0,0,0" Click="BtnCheckUpdate_Click"
+                  Background="Transparent" BorderThickness="0"
+                  Foreground="{StaticResource BlueBrush}" Padding="6,4"/>
+        </StackPanel>
+
+        <!-- Right: log + tray + branding -->
+        <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button Content="📋 Diag Log"  Width="100" Margin="2,0" Click="BtnDiagLog_Click"/>
+          <Button Content="📋 Crash Log" Width="105" Margin="2,0"
+                  Style="{StaticResource DangerButton}" Click="BtnCrashLog_Click"/>
+          <Button Content="💬 Feedback"  Width="100" Margin="2,0"
+                  Background="#1f3a2a" Foreground="#a6e3a1" BorderBrush="#3a5e44"
+                  Click="BtnFeedback_Click"/>
+          <Button Content="⊟ Tray" Width="70" Margin="2,0" Click="BtnTray_Click"/>
+          <TextBlock Text="⬡ QytCroRec" FontSize="14" FontWeight="Bold"
+                     Foreground="{StaticResource BlueBrush}"
+                     VerticalAlignment="Center" Margin="12,0,4,0"/>
           <TextBlock x:Name="VersionLabel" Text="v1.0.0" FontSize="11"
                      Foreground="{StaticResource Subtext0Brush}"
-                     Margin="8,0,0,0" VerticalAlignment="Center"/>
-        </StackPanel>
-
-        <StackPanel Grid.Column="1" Orientation="Horizontal"
-                    HorizontalAlignment="Center" VerticalAlignment="Center">
-          <Button x:Name="BtnRecord" Content="⏺  Record" Width="110" Margin="4,0"
-                  Click="BtnRecord_Click"/>
-          <Button x:Name="BtnPlay" Content="▶  Play" Width="100" Margin="4,0"
-                  Style="{StaticResource GreenButton}"
-                  Click="BtnPlay_Click"/>
-          <Button x:Name="BtnStop" Content="■  Stop All" Width="110" Margin="4,0"
-                  Style="{StaticResource DangerButton}"
-                  Click="BtnStop_Click"/>
-        </StackPanel>
-
-        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-          <Button Content="＋ Group" Width="90" Margin="4,0" Click="BtnAddGroup_Click"/>
-          <Button Content="⚙ Settings" Width="90" Margin="4,0" Click="BtnSettings_Click"/>
+                     VerticalAlignment="Center"/>
         </StackPanel>
       </Grid>
     </Border>
 
-    <!-- MAIN CONTENT -->
+    <!-- ═══ MAIN CONTENT ═══ -->
     <Grid Grid.Row="1">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="220" MinWidth="160" MaxWidth="320"/>
+        <ColumnDefinition Width="240" MinWidth="180" MaxWidth="340"/>
         <ColumnDefinition Width="4"/>
         <ColumnDefinition Width="*"/>
       </Grid.ColumnDefinitions>
 
-      <!-- Left: group list -->
+      <!-- LEFT PANEL: group list + pixel guard + guard macros -->
       <Grid Grid.Column="0" Background="{StaticResource MantleBrush}">
         <Grid.RowDefinitions>
-          <RowDefinition Height="Auto"/>
-          <RowDefinition Height="*"/>
-          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>  <!-- header -->
+          <RowDefinition Height="*"/>     <!-- group list -->
+          <RowDefinition Height="Auto"/>  <!-- pixel guard panel -->
+          <RowDefinition Height="Auto"/>  <!-- guard macros panel -->
+          <RowDefinition Height="Auto"/>  <!-- runs/executions footer -->
         </Grid.RowDefinitions>
 
         <Border Grid.Row="0" Background="{StaticResource Surface0Brush}" Padding="10,6">
@@ -115,7 +278,66 @@
           </ListBox.ContextMenu>
         </ListBox>
 
+        <!-- Pixel Guard (shared) panel -->
         <Border Grid.Row="2" Background="{StaticResource CrustBrush}"
+                BorderBrush="{StaticResource Surface0Brush}" BorderThickness="0,1,0,0"
+                Padding="10,8">
+          <StackPanel>
+            <TextBlock Text="PIXEL GUARD (shared)" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{StaticResource Subtext0Brush}" Margin="0,0,0,6"/>
+            <StackPanel Orientation="Horizontal" Margin="0,2">
+              <TextBlock Text="Source:" Width="60" VerticalAlignment="Center"
+                         Foreground="{StaticResource Subtext0Brush}"/>
+              <ComboBox x:Name="CmbGuardSource" Width="130"
+                        SelectionChanged="CmbGuardSource_Changed">
+                <ComboBoxItem Content="Primary"/>
+                <ComboBoxItem Content="Secondary"/>
+                <ComboBoxItem Content="Third"/>
+              </ComboBox>
+            </StackPanel>
+            <TextBlock Text="Lanes using it:" FontSize="10" Margin="0,6,0,2"
+                       Foreground="{StaticResource Subtext0Brush}"/>
+            <StackPanel Orientation="Horizontal">
+              <CheckBox x:Name="ChkGuardPri" Content="Pri" Margin="0,0,8,0"
+                        Checked="ChkGuardUser_Changed" Unchecked="ChkGuardUser_Changed"/>
+              <CheckBox x:Name="ChkGuardSec" Content="Sec" Margin="0,0,8,0"
+                        Checked="ChkGuardUser_Changed" Unchecked="ChkGuardUser_Changed"/>
+              <CheckBox x:Name="ChkGuardThi" Content="Thi"
+                        Checked="ChkGuardUser_Changed" Unchecked="ChkGuardUser_Changed"/>
+            </StackPanel>
+          </StackPanel>
+        </Border>
+
+        <!-- Guard Macros panel -->
+        <Border Grid.Row="3" Background="{StaticResource CrustBrush}"
+                BorderBrush="{StaticResource Surface0Brush}" BorderThickness="0,1,0,0"
+                Padding="10,8">
+          <StackPanel>
+            <TextBlock Text="GUARD MACROS" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{StaticResource Subtext0Brush}" Margin="0,0,0,6"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+              <Button Content="➕" Width="34" Margin="2,0"
+                      Background="#2d8050" Foreground="White" FontWeight="Bold"
+                      Click="BtnGuardAdd_Click"/>
+              <Button Content="🗑" Width="34" Margin="2,0"
+                      Background="#a02828" Foreground="White" FontWeight="Bold"
+                      Click="BtnGuardDel_Click"/>
+              <Button Content="REC" Width="48" Margin="2,0"
+                      Background="#d49832" Foreground="White" FontWeight="Bold"
+                      Click="BtnGuardRec_Click"/>
+              <Button Content="STOP" Width="52" Margin="2,0"
+                      Background="#d44a00" Foreground="White" FontWeight="Bold"
+                      Click="BtnGuardStop_Click"/>
+            </StackPanel>
+            <ListBox x:Name="GuardMacroList" Height="80" BorderThickness="1"
+                     BorderBrush="{StaticResource Surface0Brush}"/>
+            <Button Content="📋 View Recorded Events" Margin="0,6,0,0"
+                    Click="BtnGuardView_Click"/>
+          </StackPanel>
+        </Border>
+
+        <!-- Runs/Executions footer -->
+        <Border Grid.Row="4" Background="{StaticResource CrustBrush}"
                 BorderBrush="{StaticResource Surface0Brush}" BorderThickness="0,1,0,0"
                 Padding="10,6">
           <StackPanel>
@@ -132,140 +354,32 @@
       <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
                     Background="{StaticResource Surface0Brush}"/>
 
-      <!-- Right: lane editor -->
+      <!-- RIGHT PANEL: lane editor + activity log -->
       <Grid Grid.Column="2">
         <Grid.RowDefinitions>
-          <RowDefinition Height="Auto"/>
-          <RowDefinition Height="*"/>
-          <RowDefinition Height="160" MinHeight="80"/>
+          <RowDefinition Height="*"/>     <!-- tabs + lane sub-content -->
+          <RowDefinition Height="140" MinHeight="80"/>  <!-- activity log -->
         </Grid.RowDefinitions>
 
-        <!-- Group header -->
-        <Border Grid.Row="0" Background="{StaticResource Surface0Brush}"
-                Padding="14,8" BorderBrush="{StaticResource Surface1Brush}" BorderThickness="0,0,0,1">
-          <Grid>
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-              <TextBlock x:Name="GroupNameLabel" Text="No group selected"
-                         FontSize="15" FontWeight="SemiBold"
-                         Foreground="{StaticResource TextBrush}"/>
-              <CheckBox x:Name="ChkGroupEnabled" Content="Enabled" Margin="18,0,0,0"
-                        VerticalAlignment="Center"
-                        Checked="ChkGroupEnabled_Changed" Unchecked="ChkGroupEnabled_Changed"/>
-            </StackPanel>
-            <StackPanel Grid.Column="1" Orientation="Horizontal">
-              <TextBlock Text="Repeat:" VerticalAlignment="Center" Margin="0,0,6,0"
-                         Foreground="{StaticResource Subtext0Brush}"/>
-              <TextBox x:Name="TxtRepeat" Width="60" Text="1" VerticalAlignment="Center"
-                       TextChanged="TxtRepeat_Changed"/>
-              <TextBlock Text="Speed×:" VerticalAlignment="Center" Margin="12,0,6,0"
-                         Foreground="{StaticResource Subtext0Brush}"/>
-              <TextBox x:Name="TxtSpeed" Width="60" Text="1.0" VerticalAlignment="Center"
-                       TextChanged="TxtSpeed_Changed"/>
-            </StackPanel>
-          </Grid>
-        </Border>
+        <!-- LANE TABS: Primary / Secondary / Third / Shortcuts -->
+        <TabControl x:Name="LaneTabs" Grid.Row="0" SelectionChanged="LaneTabs_SelectionChanged">
 
-        <!-- Lane tabs -->
-        <TabControl x:Name="LaneTabs" Grid.Row="1" SelectionChanged="LaneTabs_SelectionChanged">
-
-          <!-- PRIMARY -->
-          <TabItem Header="Primary">
-            <Grid>
-              <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-              </Grid.RowDefinitions>
-              <Border Grid.Row="0" Background="{StaticResource Surface0Brush}" Padding="10,6">
-                <WrapPanel>
-                  <CheckBox x:Name="ChkPrimaryWindow" Content="Target window" Margin="0,0,12,0"
-                            Checked="ChkPrimaryWindow_Changed" Unchecked="ChkPrimaryWindow_Changed"/>
-                  <TextBox x:Name="TxtPrimaryWindow" Width="180" Margin="0,0,8,0"
-                           TextChanged="TxtPrimaryWindow_Changed"/>
-                  <Button Content="Pick" Width="50" Margin="0,0,8,0" Click="BtnPrimaryPick_Click"/>
-                  <TextBlock x:Name="LblPrimaryPid" Foreground="{StaticResource Subtext0Brush}"
-                             VerticalAlignment="Center" FontFamily="Consolas" FontSize="11"/>
-                </WrapPanel>
-              </Border>
-              <DataGrid x:Name="GridPrimary" Grid.Row="1"
-                        SelectionChanged="EventGrid_SelectionChanged" KeyDown="EventGrid_KeyDown">
-                <DataGrid.Columns>
-                  <DataGridTextColumn Header="Time (s)" Binding="{Binding Timestamp, StringFormat=F4}" Width="90"/>
-                  <DataGridTextColumn Header="Type"     Binding="{Binding EventType}" Width="110"/>
-                  <DataGridTextColumn Header="Data"     Binding="{Binding DataSummary}" Width="*"/>
-                </DataGrid.Columns>
-              </DataGrid>
-            </Grid>
+          <TabItem Header="⭐ Primary">
+            <ContentControl x:Name="LaneViewPrimary"/>
           </TabItem>
-
-          <!-- SECONDARY -->
-          <TabItem Header="Secondary">
-            <Grid>
-              <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-              </Grid.RowDefinitions>
-              <Border Grid.Row="0" Background="{StaticResource Surface0Brush}" Padding="10,6">
-                <WrapPanel>
-                  <CheckBox x:Name="ChkSecEnabled" Content="Enabled" Margin="0,0,12,0"
-                            Checked="ChkSecEnabled_Changed" Unchecked="ChkSecEnabled_Changed"/>
-                  <CheckBox x:Name="ChkSecWindow" Content="Target window" Margin="0,0,12,0"
-                            Checked="ChkSecWindow_Changed" Unchecked="ChkSecWindow_Changed"/>
-                  <TextBox x:Name="TxtSecWindow" Width="180" Margin="0,0,8,0"
-                           TextChanged="TxtSecWindow_Changed"/>
-                  <Button Content="Pick" Width="50" Margin="0,0,8,0" Click="BtnSecPick_Click"/>
-                  <TextBlock x:Name="LblSecPid" Foreground="{StaticResource Subtext0Brush}"
-                             VerticalAlignment="Center" FontFamily="Consolas" FontSize="11"/>
-                </WrapPanel>
-              </Border>
-              <DataGrid x:Name="GridSecondary" Grid.Row="1"
-                        SelectionChanged="EventGrid_SelectionChanged" KeyDown="EventGrid_KeyDown">
-                <DataGrid.Columns>
-                  <DataGridTextColumn Header="Time (s)" Binding="{Binding Timestamp, StringFormat=F4}" Width="90"/>
-                  <DataGridTextColumn Header="Type"     Binding="{Binding EventType}" Width="110"/>
-                  <DataGridTextColumn Header="Data"     Binding="{Binding DataSummary}" Width="*"/>
-                </DataGrid.Columns>
-              </DataGrid>
-            </Grid>
+          <TabItem Header="＋ Secondary">
+            <ContentControl x:Name="LaneViewSecondary"/>
           </TabItem>
-
-          <!-- THIRD -->
-          <TabItem Header="Third">
-            <Grid>
-              <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-              </Grid.RowDefinitions>
-              <Border Grid.Row="0" Background="{StaticResource Surface0Brush}" Padding="10,6">
-                <WrapPanel>
-                  <CheckBox x:Name="ChkThirdEnabled" Content="Enabled" Margin="0,0,12,0"
-                            Checked="ChkThirdEnabled_Changed" Unchecked="ChkThirdEnabled_Changed"/>
-                  <CheckBox x:Name="ChkThirdWindow" Content="Target window" Margin="0,0,12,0"
-                            Checked="ChkThirdWindow_Changed" Unchecked="ChkThirdWindow_Changed"/>
-                  <TextBox x:Name="TxtThirdWindow" Width="180" Margin="0,0,8,0"
-                           TextChanged="TxtThirdWindow_Changed"/>
-                  <Button Content="Pick" Width="50" Margin="0,0,8,0" Click="BtnThirdPick_Click"/>
-                  <TextBlock x:Name="LblThirdPid" Foreground="{StaticResource Subtext0Brush}"
-                             VerticalAlignment="Center" FontFamily="Consolas" FontSize="11"/>
-                </WrapPanel>
-              </Border>
-              <DataGrid x:Name="GridThird" Grid.Row="1"
-                        SelectionChanged="EventGrid_SelectionChanged" KeyDown="EventGrid_KeyDown">
-                <DataGrid.Columns>
-                  <DataGridTextColumn Header="Time (s)" Binding="{Binding Timestamp, StringFormat=F4}" Width="90"/>
-                  <DataGridTextColumn Header="Type"     Binding="{Binding EventType}" Width="110"/>
-                  <DataGridTextColumn Header="Data"     Binding="{Binding DataSummary}" Width="*"/>
-                </DataGrid.Columns>
-              </DataGrid>
-            </Grid>
+          <TabItem Header="＋ Third">
+            <ContentControl x:Name="LaneViewThird"/>
+          </TabItem>
+          <TabItem Header="⚙ Shortcuts">
+            <ContentControl x:Name="ShortcutsView"/>
           </TabItem>
         </TabControl>
 
         <!-- Activity log -->
-        <Grid Grid.Row="2">
+        <Grid Grid.Row="1">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -288,14 +402,32 @@
       </Grid>
     </Grid>
 
-    <!-- STATUS BAR -->
-    <Border Grid.Row="2" Background="{StaticResource CrustBrush}"
+    <!-- ═══ BOTTOM BAR: Play Chain / Stop All ═══ -->
+    <Border Grid.Row="2" Background="{StaticResource MantleBrush}"
+            BorderBrush="{StaticResource Surface0Brush}" BorderThickness="0,1,0,1"
+            Padding="14,8">
+      <StackPanel Orientation="Horizontal">
+        <Button x:Name="BtnPlayChain" Content="▶▶  Play Chain"
+                Style="{StaticResource ChainPlayButton}"
+                MinWidth="180" Click="BtnPlayChain_Click"/>
+        <Button x:Name="BtnStopAll" Content="■  Stop All" Margin="10,0,0,0"
+                Style="{StaticResource BtnStop}"
+                MinWidth="140" Click="BtnStopAll_Click"/>
+        <TextBlock x:Name="RunsInline" Text="  Runs: (none yet)"
+                   VerticalAlignment="Center" Margin="20,0,0,0"
+                   Foreground="{StaticResource Subtext0Brush}"
+                   Cursor="Hand" MouseRightButtonUp="RunsLabel_RightClick"/>
+      </StackPanel>
+    </Border>
+
+    <!-- ═══ STATUS BAR ═══ -->
+    <Border Grid.Row="3" Background="{StaticResource CrustBrush}"
             BorderBrush="{StaticResource Surface0Brush}" BorderThickness="0,1,0,0" Padding="12,4">
       <Grid>
         <TextBlock x:Name="StatusLabel" Text="Ready"
                    Foreground="{StaticResource Subtext0Brush}" FontSize="11" VerticalAlignment="Center"/>
         <TextBlock x:Name="HotkeyHint" HorizontalAlignment="Right"
-                   Text="Record: Ctrl+R  |  Stop: End"
+                   Text="Rec: Ctrl+R  |  Play: F5  |  Stop All: End  |  Chain: F8"
                    Foreground="{StaticResource Overlay0Brush}"
                    FontSize="10" VerticalAlignment="Center"/>
       </Grid>

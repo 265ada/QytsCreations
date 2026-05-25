@@ -1,0 +1,19 @@
+<Window x:Class="QytCroRec.Dialogs.CaptureCountdownDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Capture in…" Height="180" Width="380"
+        Background="{StaticResource BaseBrush}"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize" Topmost="True">
+  <Grid>
+    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+      <TextBlock Text="Click the target window now..."
+                 FontSize="14" Foreground="{StaticResource Subtext0Brush}"
+                 HorizontalAlignment="Center" Margin="0,0,0,12"/>
+      <TextBlock x:Name="CountdownText" Text="3"
+                 FontSize="60" FontWeight="Bold"
+                 Foreground="{StaticResource BlueBrush}"
+                 HorizontalAlignment="Center"/>
+    </StackPanel>
+  </Grid>
+</Window>
