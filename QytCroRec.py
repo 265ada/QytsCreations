@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.47"
+__version__ = "1.48"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2233,20 +2233,20 @@ class AutoUpdater:
                 "ping -n 5 127.0.0.1 >nul\r\n"
                 "tasklist /FI \"IMAGENAME eq QytCroRec.exe\" 2>nul | find /I \"QytCroRec.exe\" >nul\r\n"
                 "if not errorlevel 1 goto ok\r\n"
-                "echo [%date% %time%] new exe died — rolling back to backup >> %LOG%\r\n"
+                "echo [%date% %time%] new exe died - rolling back to backup >> %LOG%\r\n"
                 "if exist %BAK% (\r\n"
                 "  copy /y %BAK% %EXE% >nul\r\n"
                 "  start \"\" %EXE%\r\n"
                 "  echo [%date% %time%] rollback complete >> %LOG%\r\n"
                 ") else (\r\n"
-                "  echo [%date% %time%] no backup available — manual reinstall needed >> %LOG%\r\n"
+                "  echo [%date% %time%] no backup available - manual reinstall needed >> %LOG%\r\n"
                 ")\r\n"
                 "goto end\r\n"
                 ":ok\r\n"
                 "echo [%date% %time%] new exe launched OK >> %LOG%\r\n"
                 ":end\r\n"
                 "(goto) 2>nul & del /f /q \"%~f0\"\r\n",
-                encoding="ascii"
+                encoding="ascii", errors="replace"
             )
             subprocess.Popen(
                 ["cmd", "/c", str(batch_path)],
