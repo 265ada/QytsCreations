@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.58"
+__version__ = "1.59"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -3042,9 +3042,25 @@ class LaneWidget(QWidget):
         self._table.scrollToBottom()
 
     def highlight_event(self, idx: int):
-        if 0 <= idx < self._table.rowCount():
-            self._table.selectRow(idx)
-            self._table.scrollTo(self._table.model().index(idx, 0))
+        """Highlight a row during playback.  Skipped when widget is hidden
+        (tab not active) and debounced to 80ms so rapid-fire progress signals
+        during fast playback don't trigger a selectRow+scrollTo per event."""
+        if not self.isVisible():
+            return
+        # Debounce: store pending idx, fire via single-shot timer
+        self._hl_pending = idx
+        if not getattr(self, "_hl_timer", None):
+            self._hl_timer = QTimer(self)
+            self._hl_timer.setSingleShot(True)
+            self._hl_timer.setInterval(80)
+            def _do_hl():
+                i = getattr(self, "_hl_pending", -1)
+                if 0 <= i < self._table.rowCount():
+                    self._table.selectRow(i)
+                    self._table.scrollTo(self._table.model().index(i, 0))
+            self._hl_timer.timeout.connect(_do_hl)
+        if not self._hl_timer.isActive():
+            self._hl_timer.start()
 
     # ── Build ─────────────────────────────────────────────────────────────────
 
@@ -3517,6 +3533,7 @@ class LaneWidget(QWidget):
 
     def _fill_table(self):
         m = self._macro
+        self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
         self._table.setRowCount(0)
         self._row_event_idx = []
@@ -3597,6 +3614,7 @@ class LaneWidget(QWidget):
                 i += 1
 
         self._table.blockSignals(False)
+        self._table.setUpdatesEnabled(True)
         suffix = f"  ({len(groups)} groups)" if groups else ""
         self._ev_count.setText(f"{len(m.events)} events{suffix}")
         self._apply_filter()
@@ -4413,11 +4431,17 @@ class MainWindow(QMainWindow):
         self._safety_save_timer = QTimer(self)
         self._safety_save_timer.setInterval(5000)
         def _safety_save():
-            try:
-                self._storage.save_groups(self._groups)
-                self._storage.save_guard_macros(self._guard_macros)
-            except Exception as e:
-                print(f"[safety-save] {e}")
+            # Run in background thread — writing 80MB JSON on the GUI thread
+            # every 5 seconds caused periodic hitches during playback/recording.
+            _gs = self._groups[:]
+            _gm = list(getattr(self, "_guard_macros", []))
+            def _do():
+                try:
+                    self._storage.save_groups(_gs)
+                    self._storage.save_guard_macros(_gm)
+                except Exception as e:
+                    print(f"[safety-save] {e}")
+            threading.Thread(target=_do, daemon=True).start()
         self._safety_save_timer.timeout.connect(_safety_save)
         self._safety_save_timer.start()
 
@@ -6334,7 +6358,11 @@ class MainWindow(QMainWindow):
                     lw._enable_chk.blockSignals(False)
         self._recording_lane = None
         sound_record_stop()
-        self._storage.save_groups(self._groups)
+        # Final save after recording — move to background so GUI doesn't hitch
+        _snap = self._groups[:]
+        threading.Thread(
+            target=lambda: self._storage.save_groups(_snap),
+            daemon=True).start()
 
     def _build_shortcut_filter(self) -> set:
         skip = set()
@@ -6468,7 +6496,11 @@ class MainWindow(QMainWindow):
         self._update_active_label()
         self._set_status("Chain complete.", "#a6adc8")
         sound_play_stop(); speak("done")
-        self._storage.save_groups(self._groups)
+        # Save run-counts in background — no need to block GUI at end of macro.
+        _snap = self._groups[:]
+        threading.Thread(
+            target=lambda: self._storage.save_groups(_snap),
+            daemon=True).start()
         self._refresh_runs_label()
 
     def _on_chain_progress(self, gid: str, lane_idx: int, idx: int, total: int):

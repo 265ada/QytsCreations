@@ -1,4 +1,4 @@
 {
-  "version": "1.58",
-  "notes": "v1.58: Fix recording freeze when switching lanes. Removed blocking save_groups() call from every captured event (was writing full JSON to disk on every keystroke). Table rows now batch-rendered every 150ms instead of per-event. GUI stays smooth during fast recording."
+  "version": "1.59",
+  "notes": "v1.59: Eliminate all GUI freezes during/after recording and macro end. _fill_table wrapped in setUpdatesEnabled(False). highlight_event debounced to 80ms and skips hidden tabs. Safety-save timer, end-of-recording save, and end-of-chain save all moved to background threads."
 }
