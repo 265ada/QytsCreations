@@ -1,4 +1,4 @@
 {
-  "version": "1.42",
-  "notes": "v1.42: New RAGE app icon — circular angry-face logo embedded into the exe. Window title bar, taskbar, alt-tab, system tray, and exe-thumbnail all show it. Spec auto-generates multi-size .ico (16/24/32/48/64/128/256) from assets/rage_icon.png at build time."
+  "version": "1.43",
+  "notes": "v1.43: Guard Macro Record button now reads 'REC' in bold red Impact-style typeface on yellow gradient. Stop button uses the 🛑 octagonal stop-sign glyph on orange gradient. Artsy and unmistakable."
 }
