@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.65"
+__version__ = "1.66"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -1315,7 +1315,8 @@ def _pipe_pool_release(pid: int):
                     p.write(b"RESET\n"); p.flush()
                     p.close()
             except Exception as e:
-                _log_crash(f"[detours] pool close pid={pid}: {e}")
+                # Pipe may already be dead if game closed — not a crash.
+                print(f"[detours] pool close pid={pid}: {e}")
             del _PIPE_POOL[pid]
 
 
@@ -1352,7 +1353,8 @@ class DetoursBackend(InputBackend):
                 self._pipe.flush()
         except Exception as e:
             self._broken = True
-            _log_crash(f"[detours] write failed: {e}")
+            # Pipe broke because the game closed — expected, not a crash.
+            print(f"[detours] write failed (game closed?): {e}")
 
     def key_down(self, key_str):
         vk = _key_str_to_vk(key_str)
@@ -4990,6 +4992,11 @@ class MainWindow(QMainWindow):
         self._status     = QLabel("Ready")
         self._active_lbl = QLabel("")
         self._active_lbl.setStyleSheet("color: #a6e3a1; font-weight: bold;")
+        self._active_lbl.setToolTip("Right-click to reset run/execution counters")
+        self._active_lbl.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._active_lbl.customContextMenuRequested.connect(
+            self._runs_lbl_context)
         self._runtime_lbl = QLabel("")
         self._runtime_lbl.setStyleSheet("color: #f9e2af; font-family: Consolas, monospace;")
         sb.addWidget(self._status)
@@ -5248,6 +5255,11 @@ class MainWindow(QMainWindow):
             "padding:3px 6px; background:#11111b; border:1px solid #313244; "
             "border-radius:4px;")
         self._runs_lbl.setWordWrap(True)
+        self._runs_lbl.setToolTip("Right-click to reset run counters")
+        self._runs_lbl.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._runs_lbl.customContextMenuRequested.connect(
+            self._runs_lbl_context)
         lay.addWidget(self._runs_lbl)
         return w
 
@@ -5273,6 +5285,38 @@ class MainWindow(QMainWindow):
         if gmseg:
             parts.append("[Guard] " + "  ".join(gmseg))
         self._runs_lbl.setText("Runs:  " + "    ".join(parts) if parts else "Runs:  (none yet)")
+
+    def _runs_lbl_context(self, pos):
+        """Right-click context menu on the Runs or Executions labels."""
+        from PyQt6.QtWidgets import QMenu
+        m = QMenu(self)
+        act_all   = m.addAction("🗑  Reset ALL run counters")
+        m.addSeparator()
+        # Per-group reset actions
+        for g in self._groups:
+            total = sum(getattr(l, "run_count", 0) for l in g.lanes)
+            if total > 0:
+                a = m.addAction(f"Reset  [{g.name}]  ({total} runs)")
+                a.setData(g.id)
+        chosen = m.exec(self.sender().mapToGlobal(pos))
+        if not chosen:
+            return
+        if chosen is act_all:
+            for g in self._groups:
+                for lane in g.lanes:
+                    lane.run_count = 0
+            for gm in getattr(self, "_guard_macros", []):
+                gm.run_count = 0
+        else:
+            gid = chosen.data()
+            for g in self._groups:
+                if g.id == gid:
+                    for lane in g.lanes:
+                        lane.run_count = 0
+                    break
+        self._storage.save_groups(self._groups)
+        self._refresh_runs_label()
+        self._update_active_label()
 
     # ── Tab: Macro settings ───────────────────────────────────────────────────
 

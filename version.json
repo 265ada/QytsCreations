@@ -1,4 +1,4 @@
 {
-  "version": "1.65",
-  "notes": "v1.65: Per-lane window instance pinning. Each lane now stores target_window_instance — which Nth match of the title substring it bound to at pick time. Pick/Capture/Drag all auto-compute the instance index. resolve_lane_hwnd uses (title, instance) so Secondary/Third reliably bind their own distinct windows even after restart. Skip_hwnds fallback still ensures uniqueness when instance pins collide."
+  "version": "1.66",
+  "notes": "v1.66: Right-click Runs/Executions labels to reset counters (all groups or per-group). Fix detours pipe-break error spam in crash log — game closing while macro runs is expected, now logs to console only not crash file."
 }
