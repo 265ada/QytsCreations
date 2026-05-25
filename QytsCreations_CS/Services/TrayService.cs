@@ -20,7 +20,7 @@ public class TrayService : IDisposable
     {
         _icon = new WinForms.NotifyIcon
         {
-            Icon    = SystemIcons.Application,
+            Icon    = LoadAppIcon(),
             Visible = true,
             Text    = "QytCroRec"
         };
@@ -56,5 +56,17 @@ public class TrayService : IDisposable
     public void Dispose()
     {
         if (_icon != null) { _icon.Visible = false; _icon.Dispose(); _icon = null; }
+    }
+
+    private static Icon LoadAppIcon()
+    {
+        try
+        {
+            var uri = new Uri("pack://application:,,,/Resources/icon.ico");
+            using var stream = System.Windows.Application.GetResourceStream(uri)?.Stream;
+            if (stream != null) return new Icon(stream);
+        }
+        catch { }
+        return SystemIcons.Application;
     }
 }

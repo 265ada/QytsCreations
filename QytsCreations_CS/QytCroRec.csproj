@@ -11,6 +11,7 @@
     <AssemblyName>QytCroRec</AssemblyName>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <Version>1.0.0</Version>
+    <ApplicationIcon>Resources\icon.ico</ApplicationIcon>
 
     <!-- Publish: self-contained, single-file, compressed, partial trim. -->
     <PublishSingleFile>true</PublishSingleFile>
@@ -25,6 +26,11 @@
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="System.Speech" Version="10.0.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Resources\icon.ico" />
+    <Resource Include="Resources\icon.png" />
   </ItemGroup>
 
 </Project>
