@@ -1,4 +1,4 @@
 {
-  "version": "1.45",
-  "notes": "v1.45: New 💬 Feedback button in topbar (next to Crash Log). Opens a dialog with type / subject / body fields plus checkboxes to attach diagnostic and crash logs. On submit, opens a pre-filled GitHub issue in your browser — no API token needed, no creds stored. Falls back to saving feedback_pending.md if browser open fails."
+  "version": "1.46",
+  "notes": "v1.46: Feedback dialog adds delivery-method radios — GitHub Issue (preferred) or Email (mailto: opens default mail client, no account needed). Email destination: 265ada@gmail.com. Submit button label updates live to match the chosen route."
 }

@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.45"
+__version__ = "1.46"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -5613,17 +5613,36 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import (
             QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
             QTextEdit, QComboBox, QCheckBox, QPushButton, QDialogButtonBox,
+            QRadioButton, QButtonGroup, QFrame,
         )
         dlg = QDialog(self)
         dlg.setWindowTitle("Send Feedback")
-        dlg.setMinimumSize(520, 460)
+        dlg.setMinimumSize(520, 520)
         v = QVBoxLayout(dlg)
 
         v.addWidget(QLabel(
-            "<b>Send feedback</b> — opens a pre-filled GitHub issue in your browser.<br>"
+            "<b>Send feedback</b> — your report ships to the developer.<br>"
             "<span style='color:#7a7d99;font-size:11px;'>"
-            "You'll review it before posting.  GitHub account required to submit."
+            "You'll review the message before it leaves your machine."
             "</span>"))
+
+        # ── Delivery method: GitHub (preferred) or Email ─────────────────────
+        method_box = QFrame()
+        method_box.setStyleSheet(
+            "QFrame{background:#181825;border:1px solid #313244;border-radius:5px;}")
+        ml = QVBoxLayout(method_box); ml.setContentsMargins(8, 6, 8, 6); ml.setSpacing(2)
+        ml.addWidget(QLabel(
+            "<b>Delivery method</b> "
+            "<span style='color:#7a7d99;font-size:10px;'>"
+            "(GitHub preferred — threaded discussion, attachments)"
+            "</span>"))
+        rb_github = QRadioButton("🐙 GitHub Issue  — requires GitHub account, opens in browser")
+        rb_email  = QRadioButton("✉ Email  — opens default mail client, no account needed")
+        rb_github.setChecked(True)   # default
+        grp = QButtonGroup(dlg)
+        grp.addButton(rb_github); grp.addButton(rb_email)
+        ml.addWidget(rb_github); ml.addWidget(rb_email)
+        v.addWidget(method_box)
 
         # Category
         cat_row = QHBoxLayout()
@@ -5657,7 +5676,12 @@ class MainWindow(QMainWindow):
         # Buttons
         bb = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel)
-        send_btn = bb.addButton("Open in GitHub", QDialogButtonBox.ButtonRole.AcceptRole)
+        send_btn = bb.addButton("Open", QDialogButtonBox.ButtonRole.AcceptRole)
+        def _update_send_label():
+            send_btn.setText("Open in GitHub" if rb_github.isChecked() else "Open in Email")
+        rb_github.toggled.connect(_update_send_label)
+        rb_email .toggled.connect(_update_send_label)
+        _update_send_label()
         send_btn.setStyleSheet(
             "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
             "stop:0 #58d68d,stop:1 #28a360);color:#ffffff;border:2px solid #80e3a5;"
@@ -5710,8 +5734,48 @@ class MainWindow(QMainWindow):
 
         issue_body = "\n".join(parts)
 
-        # ── Open GitHub new-issue URL pre-filled ─────────────────────────────
         from urllib.parse import quote
+
+        # ── EMAIL branch ─────────────────────────────────────────────────────
+        if rb_email.isChecked():
+            mailto = (
+                "mailto:265ada@gmail.com"
+                f"?subject={quote('[QytCroRec] ' + title_with_tag)}"
+                f"&body={quote(issue_body)}"
+            )
+            # mailto: URLs are often capped much lower than http (~2 KB on
+            # some clients).  If too long, save body locally and email a stub
+            # pointing the user at the file.
+            if len(mailto) > 1900:
+                fb_dump = Path.home() / ".macro_recorder" / "feedback_pending.md"
+                try: fb_dump.write_text(issue_body, encoding="utf-8")
+                except Exception: pass
+                short_body = (
+                    f"Report too large to embed — see attached file:\n{fb_dump}\n"
+                    f"\nPlease attach it to this email before sending.")
+                mailto = (
+                    "mailto:265ada@gmail.com"
+                    f"?subject={quote('[QytCroRec] ' + title_with_tag)}"
+                    f"&body={quote(short_body)}"
+                )
+            opened = False
+            try:
+                import webbrowser
+                opened = webbrowser.open(mailto)
+            except Exception as e:
+                print(f"[feedback] mailto open failed: {e}")
+            if opened:
+                self._set_status("Feedback drafted in your email client.", "#a6e3a1")
+            else:
+                fb_dump = Path.home() / ".macro_recorder" / "feedback_pending.md"
+                try: fb_dump.write_text(issue_body, encoding="utf-8")
+                except Exception: pass
+                QMessageBox.information(self, "Email Client Not Found",
+                    f"Couldn't open your email client.  Saved your report to:\n\n{fb_dump}\n\n"
+                    f"Send it manually to:  265ada@gmail.com")
+            return
+
+        # ── GITHUB branch (default / preferred) ──────────────────────────────
         url = (
             "https://github.com/265ada/QytsCreations/issues/new"
             f"?title={quote(title_with_tag)}"
