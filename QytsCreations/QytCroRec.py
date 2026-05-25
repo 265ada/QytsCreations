@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.36"
+__version__ = "1.37"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2117,55 +2117,122 @@ class AutoUpdater:
                 return False
             current_exe = Path(sys.executable)
             # Name the temp download after the new version, not "_update"
-            ver_tag  = new_version.strip() or "new"
-            new_exe  = current_exe.with_name(f"QytCroRec_v{ver_tag}.exe")
-            batch_path = current_exe.with_name("_qyt_update.bat")
-            # ── Stream download with progress callback ────────────────────────
+            ver_tag      = new_version.strip() or "new"
+            new_exe      = current_exe.with_name(f"QytCroRec_v{ver_tag}.exe")
+            partial_exe  = current_exe.with_name(f"QytCroRec_v{ver_tag}.exe.partial")
+            backup_exe   = current_exe.with_name(f"QytCroRec_backup_v{self.current}.exe")
+            batch_path   = current_exe.with_name("_qyt_update.bat")
+            log_path     = current_exe.with_name("_qyt_update.log")
+            # ── Stream download to .partial file, verify, then rename ────────
             try:
                 req = urllib.request.Request(
                     self.exe_url,
-                    headers={"User-Agent": "QytCroRec-Updater"})
+                    headers={"User-Agent": "QytCroRec-Updater",
+                             "Accept": "application/octet-stream"})
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     total = int(r.headers.get("Content-Length") or 0)
-                    chunks = []
                     received = 0
-                    while True:
-                        chunk = r.read(64 * 1024)   # 64 KB chunks — snappy
-                        if not chunk: break
-                        chunks.append(chunk)
-                        received += len(chunk)
-                        if progress_cb:
-                            try: progress_cb(received, total)
-                            except Exception: pass
-                    data = b"".join(chunks)
+                    with open(partial_exe, "wb") as fp:
+                        while True:
+                            chunk = r.read(64 * 1024)
+                            if not chunk: break
+                            fp.write(chunk)
+                            received += len(chunk)
+                            if progress_cb:
+                                try: progress_cb(received, total)
+                                except Exception: pass
+                        fp.flush()
+                        try: os.fsync(fp.fileno())
+                        except Exception: pass
             except Exception as e:
                 print(f"Exe update download failed: {e}")
+                try: partial_exe.unlink()
+                except Exception: pass
                 return False
-            if len(data) < 1024 * 50:   # < 50 KB — almost certainly wrong
-                print(f"Exe update sanity check failed (size={len(data)}).")
+            # ── Integrity checks: size match + MZ header ─────────────────────
+            actual = partial_exe.stat().st_size
+            if actual < 1024 * 50:
+                print(f"Exe update sanity check failed (size={actual}).")
+                try: partial_exe.unlink()
+                except Exception: pass
                 return False
-            new_exe.write_bytes(data)
+            if total > 0 and actual != total:
+                print(f"Size mismatch: got {actual} expected {total} — download truncated.")
+                try: partial_exe.unlink()
+                except Exception: pass
+                return False
+            with open(partial_exe, "rb") as fp:
+                head = fp.read(2)
+            if head != b"MZ":
+                print(f"Not a valid Windows exe (magic={head!r}).")
+                try: partial_exe.unlink()
+                except Exception: pass
+                return False
+            # Atomic rename .partial → final
+            try:
+                if new_exe.exists(): new_exe.unlink()
+                partial_exe.replace(new_exe)
+            except Exception as e:
+                print(f"Rename .partial failed: {e}")
+                return False
+            # Keep a copy of the CURRENT exe as backup so the batch can roll
+            # back if the new exe fails to launch (Defender, missing DLL etc.)
+            try:
+                if backup_exe.exists(): backup_exe.unlink()
+                import shutil; shutil.copy2(current_exe, backup_exe)
+            except Exception as e:
+                print(f"Backup copy failed (non-fatal): {e}")
             # ── Robust batch: poll-retry until current exe is releasable ─────
             # Old version used a fixed 2 s wait — failed on slow machines because
             # Qt teardown sometimes takes longer; `move` then errored with the
             # exe still in use, leaving the user on the old version.  Now we
             # loop `move` up to 60 s, then start the new exe + self-delete.
+            # Batch:
+            #   1. Wait for old exe to release file lock (poll move up to 60s).
+            #   2. After successful move, pause 3 s so antivirus / Defender can
+            #      finish scanning the freshly-written exe (Defender briefly
+            #      locks/quarantines unsigned binaries — launching mid-scan
+            #      reproduces "python311.dll not found" from PyInstaller).
+            #   3. Launch new exe.  Test launch — if process exits within 4 s
+            #      (broken DLL / Defender quarantine) → rollback from backup
+            #      and relaunch the working old exe.
             batch_path.write_text(
                 "@echo off\r\n"
-                "setlocal\r\n"
+                "setlocal EnableDelayedExpansion\r\n"
                 f"set EXE=\"{current_exe}\"\r\n"
                 f"set NEW=\"{new_exe}\"\r\n"
+                f"set BAK=\"{backup_exe}\"\r\n"
+                f"set LOG=\"{log_path}\"\r\n"
+                "echo [%date% %time%] update batch started >> %LOG%\r\n"
                 "set /a TRIES=0\r\n"
                 ":retry\r\n"
                 "ping -n 2 127.0.0.1 >nul\r\n"
                 "move /y %NEW% %EXE% >nul 2>&1\r\n"
-                "if not errorlevel 1 goto launch\r\n"
+                "if not errorlevel 1 goto av_grace\r\n"
                 "set /a TRIES+=1\r\n"
                 "if %TRIES% lss 60 goto retry\r\n"
-                "echo Failed to replace exe after 60 tries. >> \"%~dp0_qyt_update.log\"\r\n"
+                "echo [%date% %time%] FAIL: exe still locked after 60 tries >> %LOG%\r\n"
                 "goto end\r\n"
+                ":av_grace\r\n"
+                "echo [%date% %time%] move ok, waiting for AV scan >> %LOG%\r\n"
+                "ping -n 4 127.0.0.1 >nul\r\n"
                 ":launch\r\n"
+                "echo [%date% %time%] launching new exe >> %LOG%\r\n"
                 "start \"\" %EXE%\r\n"
+                "ping -n 5 127.0.0.1 >nul\r\n"
+                "tasklist /FI \"IMAGENAME eq QytCroRec.exe\" 2>nul | find /I \"QytCroRec.exe\" >nul\r\n"
+                "if not errorlevel 1 goto ok\r\n"
+                "echo [%date% %time%] new exe died — rolling back to backup >> %LOG%\r\n"
+                "if exist %BAK% (\r\n"
+                "  copy /y %BAK% %EXE% >nul\r\n"
+                "  start \"\" %EXE%\r\n"
+                "  echo [%date% %time%] rollback complete >> %LOG%\r\n"
+                ") else (\r\n"
+                "  echo [%date% %time%] no backup available — manual reinstall needed >> %LOG%\r\n"
+                ")\r\n"
+                "goto end\r\n"
+                ":ok\r\n"
+                "echo [%date% %time%] new exe launched OK >> %LOG%\r\n"
                 ":end\r\n"
                 "(goto) 2>nul & del /f /q \"%~f0\"\r\n",
                 encoding="ascii"

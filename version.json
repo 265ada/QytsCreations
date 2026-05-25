@@ -1,4 +1,4 @@
 {
-  "version": "1.36",
-  "notes": "v1.36: Run-count summary strip below Activity Log — shows per-lane totals (Primary/Secondary/Third) per group, plus Guard macros. Only non-zero entries displayed. Increments each rep, persists across app restarts."
+  "version": "1.37",
+  "notes": "v1.37: Auto-update hardened against corrupted/AV-quarantined downloads. Streams to .partial file, verifies size match + MZ exe magic before swap. Keeps backup of current exe. Batch waits 3s for AV scan post-move, then verifies new exe stays alive 5s after launch — if it crashed (python311.dll missing etc.) auto-rolls back from backup. Diagnostic _qyt_update.log next to exe."
 }
