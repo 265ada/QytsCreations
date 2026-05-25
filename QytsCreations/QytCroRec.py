@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.62"
+__version__ = "1.63"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -6672,7 +6672,11 @@ class MainWindow(QMainWindow):
         try:
             faulthandler.disable(); _crash_fp.close()
         except Exception: pass
-        QApplication.quit()
+        # os._exit(0) bypasses the PyInstaller onefile bootloader cleanup
+        # which tries (and fails) to delete _MEI* temp dir on Windows,
+        # showing an annoying "Failed to remove temporary directory" dialog.
+        # Saves are done above so no data is lost.
+        os._exit(0)
 
     def closeEvent(self, event):
         self._storage.save_groups(self._groups)

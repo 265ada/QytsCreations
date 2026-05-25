@@ -1,4 +1,4 @@
 {
-  "version": "1.62",
-  "notes": "v1.62: Events no longer disappear. Groups of same-type events now expand by default (collapsed=False) so all steps are always visible. Click group header to collapse if needed. Playback highlight auto-expands any collapsed group it lands in."
+  "version": "1.63",
+  "notes": "v1.63: Fix 'Failed to remove temporary directory' warning on exit. _quit_app now calls os._exit(0) to bypass PyInstaller bootloader cleanup which was failing to delete _MEI* temp dir on Windows (Defender/DLL still mapped) and showing the dialog."
 }
