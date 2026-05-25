@@ -1,4 +1,4 @@
 {
-  "version": "1.43",
-  "notes": "v1.43: Guard Macro Record button now reads 'REC' in bold red Impact-style typeface on yellow gradient. Stop button uses the 🛑 octagonal stop-sign glyph on orange gradient. Artsy and unmistakable."
+  "version": "1.44",
+  "notes": "v1.44: New 'Check Now' link next to the Auto-Update checkbox triggers an immediate update check. App also polls GitHub quietly every 30 minutes in the background — unobtrusive, only prompts when a real new version exists."
 }

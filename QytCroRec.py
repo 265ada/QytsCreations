@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.43"
+__version__ = "1.44"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -4074,6 +4074,7 @@ class MainWindow(QMainWindow):
     _update_available_sig = pyqtSignal(object, dict)   # (AutoUpdater, info_dict)
     _update_done_sig      = pyqtSignal(bool)           # ok
     _update_progress_sig  = pyqtSignal(int, int)       # received, total
+    _no_update_sig        = pyqtSignal(str)            # status message
 
     def __init__(self):
         super().__init__()
@@ -4111,6 +4112,13 @@ class MainWindow(QMainWindow):
         self._update_available_sig.connect(self._prompt_update)
         self._update_done_sig.connect(self._on_update_done)
         self._update_progress_sig.connect(self._on_update_progress)
+        self._no_update_sig.connect(self._on_no_update)
+        # Periodic background update polling — every 30 min, unobtrusive
+        self._update_poll_timer = QTimer(self)
+        self._update_poll_timer.setInterval(30 * 60 * 1000)
+        self._update_poll_timer.timeout.connect(
+            lambda: threading.Thread(target=self._check_for_updates, daemon=True).start())
+        self._update_poll_timer.start()
         self._update_dlg = None      # QProgressDialog (created on demand)
         self._updating   = False     # True after user confirms — bypass closeEvent prompt
 
@@ -4240,10 +4248,12 @@ class MainWindow(QMainWindow):
                 "Only uncheck this if you are satisfied with the current version\n"
                 "or prefer to update manually from GitHub Releases.")
 
-    def _check_for_updates(self):
-        """Runs in a daemon thread — uses signal to marshal result to GUI thread."""
-        # Re-read pref from disk (checkbox may not be built yet on first call)
-        if not self._storage.load_pref("auto_update", True):
+    def _check_for_updates(self, manual: bool = False):
+        """Runs in a daemon thread — uses signal to marshal result to GUI thread.
+        manual=True: triggered by user via the Check Now button.  Skips the
+        auto_update pref gate and shows a status message if no update found
+        (so user knows the click did something)."""
+        if not manual and not self._storage.load_pref("auto_update", True):
             return
         upd = AutoUpdater(__version__, UPDATE_VERSION_URL, UPDATE_SCRIPT_URL,
                           exe_url=UPDATE_EXE_URL)
@@ -4251,10 +4261,23 @@ class MainWindow(QMainWindow):
             info = upd.check()
         except Exception as e:
             print(f"[autoupdate] check failed: {e}")
+            if manual:
+                self._no_update_sig.emit(f"Update check failed: {e}")
             return
         if info:
-            # Emit signal — this is thread-safe and marshals to GUI thread
             self._update_available_sig.emit(upd, info)
+        elif manual:
+            self._no_update_sig.emit(f"You're on the latest version (v{__version__}).")
+
+    def _manual_update_check(self):
+        """Check Now button handler — runs check off the GUI thread."""
+        self._set_status("Checking for updates…", "#89b4fa")
+        threading.Thread(
+            target=lambda: self._check_for_updates(manual=True),
+            daemon=True).start()
+
+    def _on_no_update(self, msg: str):
+        self._set_status(msg, "#a6adc8")
 
     def _prompt_update(self, upd: "AutoUpdater", info: dict):
         msg = QMessageBox(self)
@@ -4435,6 +4458,19 @@ class MainWindow(QMainWindow):
         self._autoupdate_chk.setChecked(self._storage.load_pref("auto_update", True))
         self._autoupdate_chk.toggled.connect(self._on_autoupdate_toggled)
         row.addWidget(self._autoupdate_chk)
+        # Minimalist "Check Now" link-style button — small, unobtrusive
+        btn_check = QPushButton("Check Now")
+        btn_check.setToolTip(
+            "Check GitHub for a newer release right now.\n"
+            "App also polls quietly every 30 minutes in the background.")
+        btn_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_check.setStyleSheet(
+            "QPushButton{background:transparent;color:#89b4fa;border:none;"
+            "padding:2px 6px;font-size:11px;text-decoration:underline;}"
+            "QPushButton:hover{color:#cdd6f4;}"
+            "QPushButton:pressed{color:#74c7ec;}")
+        btn_check.clicked.connect(self._manual_update_check)
+        row.addWidget(btn_check)
 
         row.addStretch()
         btn_diag = QPushButton("📋 Diag Log")
