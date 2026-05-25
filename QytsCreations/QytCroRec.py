@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.63"
+__version__ = "1.64"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -98,8 +98,9 @@ def _configure_bundled_tesseract():
     if tess_exe.exists():
         _pytesseract.pytesseract.tesseract_cmd = str(tess_exe)
     if tessdata.exists():
-        # TESSDATA_PREFIX must point to the *parent* of the tessdata folder
-        os.environ.setdefault("TESSDATA_PREFIX", meipass)
+        # Tesseract 5 expects TESSDATA_PREFIX to point to the tessdata/ folder
+        # itself (it looks for {TESSDATA_PREFIX}/eng.traineddata directly).
+        os.environ["TESSDATA_PREFIX"] = str(tessdata)
 
 _configure_bundled_tesseract()
 
@@ -2969,11 +2970,13 @@ class LaneWidget(QWidget):
 
     def __init__(self, macro: Macro, lane_index: int,
                  all_macros_fn,        # callable → list[Macro]
+                 group: "MacroGroup | None" = None,
                  parent=None):
         super().__init__(parent)
         self._macro        = macro
         self._lane_index   = lane_index
         self._all_macros   = all_macros_fn   # late-bound so it sees current list
+        self._group        = group           # for skip_hwnds in _refresh_pid_label
         self._is_primary   = (lane_index == 0)
         self._row_event_idx: list = []
         self._groups: dict = {}
@@ -4041,7 +4044,17 @@ class LaneWidget(QWidget):
         m = self._macro
         if not m.use_target_window or not m.target_window_title:
             self._pid_lbl.setText(""); return
-        hwnd = find_window_hwnd(m.target_window_title)
+        # Build skip_hwnds from lanes that come before this one in the group
+        # so Secondary/Third get their own distinct window, not Primary's.
+        skip_hwnds: set = set()
+        if self._group and self._lane_index > 0:
+            for prior_idx in range(self._lane_index):
+                prior = self._group.lanes[prior_idx]
+                if prior.use_target_window and prior.target_window_title:
+                    _h = find_window_hwnd(prior.target_window_title, skip_hwnds)
+                    if _h:
+                        skip_hwnds.add(_h)
+        hwnd = find_window_hwnd(m.target_window_title, skip_hwnds or None)
         if not hwnd:
             self._pid_lbl.setText("⚠ Window not found"); return
         pid = get_window_pid(hwnd)
@@ -5807,6 +5820,7 @@ class MainWindow(QMainWindow):
                 macro=lane,
                 lane_index=i,
                 all_macros_fn=self._all_macros,
+                group=g,
                 parent=self)
             lw.changed.connect(lambda mid: self._on_lane_changed())
             lw.record_req.connect(self._on_record_req)

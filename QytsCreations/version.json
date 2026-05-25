@@ -1,4 +1,4 @@
 {
-  "version": "1.63",
-  "notes": "v1.63: Fix 'Failed to remove temporary directory' warning on exit. _quit_app now calls os._exit(0) to bypass PyInstaller bootloader cleanup which was failing to delete _MEI* temp dir on Windows (Defender/DLL still mapped) and showing the dialog."
+  "version": "1.64",
+  "notes": "v1.64: Fix Tesseract TESSDATA_PREFIX pointing to wrong dir (now points to tessdata/ subfolder directly). Fix Secondary/Third lane PID label showing Primary's window — _refresh_pid_label now uses skip_hwnds to resolve each lane's unique window instance."
 }
