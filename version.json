@@ -1,4 +1,4 @@
 {
-  "version": "1.50",
-  "notes": "v1.50: CRITICAL FIX — disabled UPX compression in PyInstaller spec. UPX-packed onefile exes trigger Windows Defender 'packer detected' heuristic, which quarantined python311.dll during extraction, causing 'Failed to load Python DLL ... _MEI*\\python311.dll' at launch. Exe is ~30 MB larger but actually runs. Affected every build since UPX was enabled."
+  "version": "1.51",
+  "notes": "v1.51: CI workflow opts JavaScript actions into Node.js 24 ahead of GitHub's 2026-06-02 forced cutover and 2026-09-16 Node 20 removal. No more deprecation warnings in build logs."
 }
