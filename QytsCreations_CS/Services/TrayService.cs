@@ -32,8 +32,9 @@ public class TrayService : IDisposable
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add("Quit", null, (_, _) =>
         {
-            _icon!.Visible = false;
-            Application.Current.Shutdown();
+            try { _icon!.Visible = false; _icon.Dispose(); } catch { }
+            if (_owner is MainWindow mw) mw.ForceClose();
+            else { Application.Current.Shutdown(); }
         });
         _icon.ContextMenuStrip = menu;
     }

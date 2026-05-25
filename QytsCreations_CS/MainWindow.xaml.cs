@@ -124,19 +124,33 @@ public partial class MainWindow : Window
             });
     }
 
+    private bool _forceExit;
+
     private void OnClosing(object? sender, CancelEventArgs e)
     {
-        if (_settings.MinimizeToTray && _tray != null)
+        if (!_forceExit && _settings.MinimizeToTray && _tray != null)
         {
             e.Cancel = true;
             _tray.HideToTray();
             return;
         }
-        StopAll();
-        _hotkeys.Dispose();
-        _tray?.Dispose();
-        _pidTimer.Stop();
-        SaveCurrentGroup();
+        // Real shutdown — make every background thing die.
+        try { StopAll(); }            catch { }
+        try { _hotkeys.Dispose(); }   catch { }
+        try { _tray?.Dispose(); }     catch { }
+        try { _pidTimer.Stop(); }     catch { }
+        try { SaveCurrentGroup(); }   catch { }
+
+        // Belt + braces: schedule a hard exit in case some pump (WinForms NotifyIcon,
+        // pinned thread, etc.) keeps the process alive after Shutdown.
+        Task.Run(() => { Thread.Sleep(1500); Environment.Exit(0); });
+    }
+
+    /// <summary>Called by Tray "Quit" menu — bypasses minimize-to-tray.</summary>
+    public void ForceClose()
+    {
+        _forceExit = true;
+        Close();
     }
 
     private void OnStateChanged(object? s, EventArgs e)
