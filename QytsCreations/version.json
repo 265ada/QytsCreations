@@ -1,4 +1,4 @@
 {
-  "version": "1.54",
-  "notes": "v1.54: No more runaway cmd windows during failed updates. Batch now hidden (CREATE_NO_WINDOW), runs silently. Single-instance lock prevents stacking multiple update batches on top of each other. Retries cut 60→20 (40s max) so a doomed update gives up faster instead of looping for 2 minutes. Startup orphan sweep also cleans stale _qyt_update.bat and _qyt_update.lock."
+  "version": "1.55",
+  "notes": "v1.55: Guard Macro Stop button now reads bold 'STOP' in Impact/Arial Black 900-weight on the orange gradient. Matches the REC button's broadcast typeface. Octagonal emoji removed."
 }

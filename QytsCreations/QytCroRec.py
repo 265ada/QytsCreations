@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.54"
+__version__ = "1.55"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -4893,17 +4893,15 @@ class MainWindow(QMainWindow):
             "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
             "stop:0 #fff099,stop:1 #e0b820);border-color:#fff5b0;color:#ff0000;}"
             "QPushButton:pressed{background:#a07800;color:#ffffff;}")
-        # ── Stop: tiny octagonal stop-sign glyph ──────────────────────────────
-        # 🛑 = U+1F6D1 OCTAGONAL SIGN (the red stop-sign emoji).  Keep button
-        # background orange (matches user's earlier color request) so the
-        # octagon pops against it.
-        btn_gm_stop = QPushButton("🛑")
+        # ── Stop: bold STOP wordmark on orange ────────────────────────────────
+        btn_gm_stop = QPushButton("STOP")
         btn_gm_stop.setToolTip("Stop Recording — end the current guard macro capture")
         btn_gm_stop.setStyleSheet(
             "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
             "stop:0 #ffae5c,stop:1 #e07016);color:#ffffff;"
             "border:2px solid #ffc88a;border-radius:6px;"
-            "font-size:18px;font-weight:bold;padding:2px;}"
+            "font-family:'Impact','Arial Black',sans-serif;"
+            "font-size:13px;font-weight:900;letter-spacing:1px;padding:2px;}"
             "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
             "stop:0 #ffc080,stop:1 #f08828);border-color:#ffd9a8;}"
             "QPushButton:pressed{background:#a04a00;}")
