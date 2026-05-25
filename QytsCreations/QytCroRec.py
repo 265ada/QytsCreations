@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.32"
+__version__ = "1.33"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -201,6 +201,13 @@ class MacroGroup:
     name: str  = "New Group"
     # Serialised as a list of Macro dicts; held as list[Macro] at runtime.
     lanes: list = field(default_factory=list)
+    # Shared pixel-bot guard config — which lane (0,1,2) provides guard settings
+    # that ALL participating lanes use during playback.  -1 = no shared guard
+    # (each lane uses its own per-lane config).
+    shared_guard_lane: int = -1
+    # Bitmask of lanes that should USE the shared guard: bit 0 = primary,
+    # bit 1 = secondary, bit 2 = third.  Only used when shared_guard_lane >= 0.
+    shared_guard_users: int = 0b111
 
     def get_lane(self, idx: int) -> Optional["Macro"]:
         if 0 <= idx < len(self.lanes):
@@ -209,7 +216,7 @@ class MacroGroup:
 
     def ensure_lanes(self, n: int = 3):
         """Pad lanes list to at least n entries with blank Macros."""
-        labels = ["Primary", "Secondary 1", "Secondary 2"]
+        labels = ["Primary", "Secondary", "Third"]
         while len(self.lanes) < n:
             i = len(self.lanes)
             m = Macro(name=labels[i] if i < len(labels) else f"Lane {i+1}")
@@ -278,6 +285,8 @@ class Storage:
             return {
                 "id":    g.id,
                 "name":  g.name,
+                "shared_guard_lane":  getattr(g, "shared_guard_lane", -1),
+                "shared_guard_users": getattr(g, "shared_guard_users", 0b111),
                 "lanes": [asdict(lane) for lane in g.lanes],
             }
         bak = self.groups_path.with_suffix(".bak.json")
@@ -294,6 +303,8 @@ class Storage:
                 for gd in json.loads(self.groups_path.read_text(encoding="utf-8")):
                     g = MacroGroup(id=gd.get("id", str(uuid.uuid4())),
                                    name=gd.get("name", "Group"))
+                    g.shared_guard_lane  = int(gd.get("shared_guard_lane", -1))
+                    g.shared_guard_users = int(gd.get("shared_guard_users", 0b111))
                     for ld in gd.get("lanes", []):
                         ld2 = dict(ld)
                         g.lanes.append(_macro_from_dict(ld2))
@@ -1141,6 +1152,18 @@ def _inject_hook(pid: int, timeout: float = 4.0, force_reload: bool = False) -> 
 # close only when the last lane finishes.
 _PIPE_POOL:      dict = {}          # pid → {"pipe": file, "lock": Lock, "refs": int}
 _PIPE_POOL_LOCK: threading.Lock = threading.Lock()
+# Per-PID inject lock — prevents two parallel lanes both running injector.exe
+# on the same PID simultaneously (race could crash the game).
+_INJECT_LOCKS:      dict = {}
+_INJECT_LOCKS_LOCK: threading.Lock = threading.Lock()
+
+def _get_inject_lock(pid: int) -> threading.Lock:
+    with _INJECT_LOCKS_LOCK:
+        lk = _INJECT_LOCKS.get(pid)
+        if lk is None:
+            lk = threading.Lock()
+            _INJECT_LOCKS[pid] = lk
+        return lk
 
 def _pipe_pool_acquire(pid: int) -> tuple:
     """
@@ -1202,11 +1225,12 @@ class DetoursBackend(InputBackend):
             log = Path.home() / ".macro_recorder" / "dll_hook.log"
             if log.exists(): log.write_text("", encoding="utf-8")
         except Exception: pass
-        # ALWAYS run inject — _inject_hook handles eject-then-inject so the
-        # latest DLL build is what ends up loaded.
-        ok, msg = _inject_hook(target_pid)
-        if not ok:
-            raise RuntimeError(msg)
+        # Serialise inject for this PID — parallel lanes targeting the same
+        # process must NOT call injector.exe simultaneously (race crashes game).
+        with _get_inject_lock(target_pid):
+            ok, msg = _inject_hook(target_pid)
+            if not ok:
+                raise RuntimeError(msg)
         self._pid  = target_pid
         # Acquire shared pipe handle for this PID (opens once, shared across lanes)
         self._pipe, self._pipe_lock = _pipe_pool_acquire(target_pid)
@@ -1804,17 +1828,26 @@ class ChainPlayerThread(QThread):
 
             # ── Fire ALL active lanes simultaneously ──────────────────────────
             def _run_lane_worker(lane_idx, lane):
-                self.lane_started.emit(g.id, lane_idx, lane.id)
-                self.log_sig.emit(
-                    f"[{g.name}] Lane {lane_idx} '{lane.name}' starting ({rep_label})")
-                ok = self._run_one_lane(lane_idx, lane, all_macros)
-                self.lane_stopped.emit(g.id, lane_idx, lane.id)
-                if ok:
+                try:
+                    self.lane_started.emit(g.id, lane_idx, lane.id)
                     self.log_sig.emit(
-                        f"[{g.name}] Lane {lane_idx} '{lane.name}' complete.")
-                else:
+                        f"[{g.name}] Lane {lane_idx} '{lane.name}' starting ({rep_label})")
+                    ok = self._run_one_lane(lane_idx, lane, all_macros)
+                    if ok:
+                        self.log_sig.emit(
+                            f"[{g.name}] Lane {lane_idx} '{lane.name}' complete.")
+                    else:
+                        self.log_sig.emit(
+                            f"[{g.name}] Lane {lane_idx} '{lane.name}' stopped early.")
+                except Exception as e:
+                    # Never let a worker crash silently — would deadlock t.join().
+                    _log_crash(f"[lane worker {lane_idx}] {e}\n{traceback.format_exc()}")
                     self.log_sig.emit(
-                        f"[{g.name}] Lane {lane_idx} '{lane.name}' stopped early.")
+                        f"[{g.name}] Lane {lane_idx} '{lane.name}' CRASHED: {e}")
+                finally:
+                    # ALWAYS emit lane_stopped so UI button states reset, even on crash.
+                    try: self.lane_stopped.emit(g.id, lane_idx, lane.id)
+                    except Exception: pass
 
             threads = [
                 threading.Thread(target=_run_lane_worker, args=(li, ln), daemon=True)
@@ -1908,9 +1941,21 @@ class ChainPlayerThread(QThread):
     def _pixel_guard(self, ev, lane, backend, target_hwnd,
                      all_macros, lane_idx) -> bool:
         if not ev.get("pixel_guard"): return False
-        if not getattr(lane, "pixel_guard_enabled", False): return False
-        red_flags = getattr(lane, "pixel_guard_red_flags", [])
+        # Resolve which lane provides the guard CONFIG for this run:
+        #   - If the group has shared_guard_lane >= 0 AND this lane is in
+        #     shared_guard_users bitmask → use that lane's guard config.
+        #   - Otherwise → use this lane's own guard config.
+        g = self.group
+        sgl  = getattr(g, "shared_guard_lane", -1)
+        sgu  = getattr(g, "shared_guard_users", 0b111)
+        cfg_lane = lane
+        if 0 <= sgl < len(g.lanes) and (sgu & (1 << lane_idx)):
+            cfg_lane = g.lanes[sgl]
+        if not getattr(cfg_lane, "pixel_guard_enabled", False): return False
+        red_flags = getattr(cfg_lane, "pixel_guard_red_flags", [])
         if not red_flags: return False
+        # Re-bind lane to cfg_lane for guard region/correction settings below
+        lane = cfg_lane
         text = _pixel_ocr_region(
             target_hwnd,
             getattr(lane, "pixel_guard_cap_x_pct", 0.75),
@@ -4219,7 +4264,39 @@ class MainWindow(QMainWindow):
         self._group_list.currentRowChanged.connect(self._on_group_row_changed)
         self._group_list.itemDoubleClicked.connect(self._rename_group_item)
         self._group_list.itemChanged.connect(self._on_group_item_renamed)
-        lay.addWidget(self._group_list)
+        lay.addWidget(self._group_list, 1)
+
+        # ── Shared Pixel-Bot Guard panel ──────────────────────────────────────
+        gp_hdr = QLabel("PIXEL GUARD (shared)")
+        gp_hdr.setStyleSheet("color:#585b70;font-size:10px;font-weight:bold;padding:6px 0 2px 0;")
+        lay.addWidget(gp_hdr)
+
+        gp_box = QWidget()
+        gp_box.setStyleSheet("background:#1e1e2e;border:1px solid #313244;border-radius:5px;")
+        gpl = QVBoxLayout(gp_box); gpl.setContentsMargins(6, 6, 6, 6); gpl.setSpacing(4)
+
+        src_row = QHBoxLayout(); src_row.setSpacing(4)
+        src_row.addWidget(QLabel("Source:"))
+        self._guard_src_combo = QComboBox()
+        self._guard_src_combo.addItem("Off (per-lane)", -1)
+        self._guard_src_combo.addItem("Primary",        0)
+        self._guard_src_combo.addItem("Secondary",      1)
+        self._guard_src_combo.addItem("Third",          2)
+        self._guard_src_combo.currentIndexChanged.connect(self._on_shared_guard_src_changed)
+        src_row.addWidget(self._guard_src_combo, 1)
+        gpl.addLayout(src_row)
+
+        gpl.addWidget(QLabel("<span style='color:#7a7d99;font-size:10px;'>Lanes using it:</span>"))
+        users_row = QHBoxLayout(); users_row.setSpacing(4)
+        self._guard_use_chk_p = QCheckBox("Pri")
+        self._guard_use_chk_s = QCheckBox("Sec")
+        self._guard_use_chk_t = QCheckBox("Thi")
+        for c in (self._guard_use_chk_p, self._guard_use_chk_s, self._guard_use_chk_t):
+            c.stateChanged.connect(self._on_shared_guard_users_changed)
+            users_row.addWidget(c)
+        gpl.addLayout(users_row)
+
+        lay.addWidget(gp_box)
         return w
 
     def _build_center(self) -> QWidget:
@@ -4233,7 +4310,7 @@ class MainWindow(QMainWindow):
             "QTabBar::tab { padding:7px 20px; font-size:13px; }"
             "QTabBar::tab:selected { background:#313244; color:#cdd6f4; }")
         # Placeholder lane widgets — replaced when a group is selected
-        for i, label in enumerate(["⭐ Primary", "➕ Lane 2", "➕ Lane 3"]):
+        for i, label in enumerate(["⭐ Primary", "➕ Secondary", "➕ Third"]):
             placeholder = QWidget()
             self._lane_tabs.addTab(placeholder, label)
         self._lane_tabs.addTab(self._build_tab_shortcuts(), "⌨ Shortcuts")
@@ -4762,7 +4839,7 @@ class MainWindow(QMainWindow):
         self._btn_play_chain.setObjectName("btn_play")
         self._btn_play_chain.setMinimumWidth(130)
         self._btn_play_chain.setToolTip(
-            "Run Primary → Lane 2 → Lane 3 in sequence.\n"
+            "Run Primary + Secondary + Third in parallel (all lanes simultaneously).\n"
             "Repeats according to Primary's repeat setting.")
         self._btn_play_chain.clicked.connect(self._play_chain)
         self._register_btn("play", self._btn_play_chain, "Play chain (all lanes)")
@@ -4906,7 +4983,7 @@ class MainWindow(QMainWindow):
         self._lane_tabs.removeTab(0)
 
         self._lane_widgets = []
-        lane_labels = ["⭐ Primary", "➕ Lane 2", "➕ Lane 3"]
+        lane_labels = ["⭐ Primary", "➕ Secondary", "➕ Third"]
         for i, lane in enumerate(g.lanes):
             lw = LaneWidget(
                 macro=lane,
@@ -4927,6 +5004,42 @@ class MainWindow(QMainWindow):
         self._lane_tabs.currentChanged.connect(self._on_lane_tab_changed)
         self._rebuild_hotkeys()
         self._update_play_btns()
+        self._refresh_shared_guard_ui()
+
+    def _refresh_shared_guard_ui(self):
+        if not hasattr(self, "_guard_src_combo") or not self._cur_group:
+            return
+        g = self._cur_group
+        sgl = getattr(g, "shared_guard_lane", -1)
+        sgu = getattr(g, "shared_guard_users", 0b111)
+        self._guard_src_combo.blockSignals(True)
+        idx = max(0, [-1, 0, 1, 2].index(sgl) if sgl in (-1, 0, 1, 2) else 0)
+        self._guard_src_combo.setCurrentIndex(idx)
+        self._guard_src_combo.blockSignals(False)
+        for bit, chk in enumerate(
+            (self._guard_use_chk_p, self._guard_use_chk_s, self._guard_use_chk_t)
+        ):
+            chk.blockSignals(True)
+            chk.setChecked(bool(sgu & (1 << bit)))
+            chk.setEnabled(sgl >= 0)
+            chk.blockSignals(False)
+
+    def _on_shared_guard_src_changed(self, idx: int):
+        if not self._cur_group: return
+        val = self._guard_src_combo.itemData(idx)
+        self._cur_group.shared_guard_lane = int(val) if val is not None else -1
+        for chk in (self._guard_use_chk_p, self._guard_use_chk_s, self._guard_use_chk_t):
+            chk.setEnabled(self._cur_group.shared_guard_lane >= 0)
+        self._storage.save_groups(self._groups)
+
+    def _on_shared_guard_users_changed(self):
+        if not self._cur_group: return
+        mask = 0
+        if self._guard_use_chk_p.isChecked(): mask |= 0b001
+        if self._guard_use_chk_s.isChecked(): mask |= 0b010
+        if self._guard_use_chk_t.isChecked(): mask |= 0b100
+        self._cur_group.shared_guard_users = mask
+        self._storage.save_groups(self._groups)
 
     def _on_lane_changed(self):
         self._storage.save_groups(self._groups)
@@ -5075,7 +5188,16 @@ class MainWindow(QMainWindow):
             record_mouse_move=m.record_mouse_move,
             filter_keys=self._build_shortcut_filter(),
             target_hwnd=target_hwnd)
-        rec.captured.connect(lambda ev, lw_=lw: lw_.add_event(ev))
+        # Save groups on every Nth event so unexpected app close / power loss
+        # doesn't wipe in-progress recording.
+        self._rec_save_ctr = 0
+        def _capture(ev, lw_=lw):
+            lw_.add_event(ev)
+            self._rec_save_ctr += 1
+            if self._rec_save_ctr % 25 == 0:
+                try: self._storage.save_groups(self._groups)
+                except Exception as e: print(f"[autosave-rec] {e}")
+        rec.captured.connect(_capture)
         rec.done.connect(lambda mid=macro_id: self._on_rec_done(mid))
         self._recorders[macro_id] = rec
         lw.set_recording(True)
@@ -5220,7 +5342,16 @@ class MainWindow(QMainWindow):
             self._runtime_timer.stop()
             self._runtime_lbl.setText("")
         self._update_play_btns()
-        self._refresh_group_list()
+        # Lightweight refresh ONLY — don't call _refresh_group_list because it
+        # triggers setCurrentRow → _load_group → destroys + recreates all
+        # LaneWidgets which reverts UI state and bleeds Primary settings into
+        # Secondary/Third tabs (PID bleed bug).  Just recolor the row.
+        if self._cur_group:
+            for i in range(self._group_list.count()):
+                item = self._group_list.item(i)
+                if item and item.data(Qt.ItemDataRole.UserRole) == gid:
+                    item.setForeground(QColor("#cdd6f4"))
+                    break
         for lw in self._lane_widgets:
             lw.set_playing(False)
         self._update_active_label()

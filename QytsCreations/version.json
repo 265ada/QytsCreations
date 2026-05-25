@@ -1,4 +1,4 @@
 {
-  "version": "1.32",
-  "notes": "v1.32: Fix Detours pipe Errno 22 on parallel lanes — shared per-PID pipe pool with write-lock so multiple lanes targeting the same game process share one connection. Stop button now bright red."
+  "version": "1.33",
+  "notes": "v1.33: Lane PID bleed FIXED — chain stop no longer destroys + recreates LaneWidgets. Events autosave every 25 captures (no loss on crash). Worker threads wrapped in try/except (chain repeats reliably). Per-PID inject lock prevents parallel injector races. Group-level shared Pixel Guard config selectable by Primary/Secondary/Third. Lane 2→Secondary, Lane 3→Third labels."
 }
