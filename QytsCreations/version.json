@@ -1,4 +1,4 @@
 {
-  "version": "1.53",
-  "notes": "v1.53: TWO BIG FIXES. (1) Lanes no longer appear to wait for each other — recorded events are now rebased so the first event is at t=0, killing the reaction-time lead-in that made parallel lanes look synced. Each lane fires INSTANTLY on play. (2) Events now save AGGRESSIVELY: every single captured event triggers an atomic save (.tmp + fsync + os.replace, no corruption possible), plus a 5-second safety-net autosave timer for every other edit. Stop losing your recordings."
+  "version": "1.54",
+  "notes": "v1.54: No more runaway cmd windows during failed updates. Batch now hidden (CREATE_NO_WINDOW), runs silently. Single-instance lock prevents stacking multiple update batches on top of each other. Retries cut 60→20 (40s max) so a doomed update gives up faster instead of looping for 2 minutes. Startup orphan sweep also cleans stale _qyt_update.bat and _qyt_update.lock."
 }

@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.53"
+__version__ = "1.54"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2244,6 +2244,7 @@ class AutoUpdater:
                 f"set NEW=\"{new_exe}\"\r\n"
                 f"set BAK=\"{backup_exe}\"\r\n"
                 f"set LOG=\"{log_path}\"\r\n"
+                f"set LOCK=\"{lock_path}\"\r\n"
                 "echo [%date% %time%] update batch started >> %LOG%\r\n"
                 "set /a TRIES=0\r\n"
                 ":retry\r\n"
@@ -2251,14 +2252,14 @@ class AutoUpdater:
                 "copy /y %EXE% %BAK% >nul 2>&1\r\n"
                 "if errorlevel 1 (\r\n"
                 "  set /a TRIES+=1\r\n"
-                "  if !TRIES! lss 60 goto retry\r\n"
-                "  echo [%date% %time%] backup copy failed after 60 tries >> %LOG%\r\n"
+                "  if !TRIES! lss 20 goto retry\r\n"
+                "  echo [%date% %time%] backup copy failed after 20 tries >> %LOG%\r\n"
                 ")\r\n"
                 "move /y %NEW% %EXE% >nul 2>&1\r\n"
                 "if not errorlevel 1 goto av_grace\r\n"
                 "set /a TRIES+=1\r\n"
-                "if %TRIES% lss 60 goto retry\r\n"
-                "echo [%date% %time%] FAIL: exe still locked after 60 tries >> %LOG%\r\n"
+                "if %TRIES% lss 20 goto retry\r\n"
+                "echo [%date% %time%] FAIL: exe still locked after 20 tries >> %LOG%\r\n"
                 "goto end\r\n"
                 ":av_grace\r\n"
                 "echo [%date% %time%] move ok, waiting for AV scan >> %LOG%\r\n"
@@ -2281,12 +2282,33 @@ class AutoUpdater:
                 ":ok\r\n"
                 "echo [%date% %time%] new exe launched OK >> %LOG%\r\n"
                 ":end\r\n"
+                "del /f /q %LOCK% >nul 2>&1\r\n"
                 "(goto) 2>nul & del /f /q \"%~f0\"\r\n",
                 encoding="ascii", errors="replace"
             )
+            # Single-instance lock — refuse to spawn a second update batch if
+            # one's already running.  Without this, every Check Now click +
+            # every restart of the broken exe would Popen another cmd window,
+            # piling up runaway batches retrying the same broken swap.
+            lock_path = current_exe.with_name("_qyt_update.lock")
+            if lock_path.exists():
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                    if age < 120:   # less than 2 min old → another batch live
+                        return _fail("Update batch already running — wait for it to finish.")
+                    # stale lock — clear it
+                    lock_path.unlink()
+                except Exception: pass
+            try: lock_path.write_text(str(os.getpid()))
+            except Exception: pass
+            # CREATE_NO_WINDOW (0x08000000) hides the cmd console.  User
+            # previously saw a flashing cmd prompt looping `ping 127.0.0.1`
+            # forever when the broken exe failed every relaunch.  Now silent.
             subprocess.Popen(
                 ["cmd", "/c", str(batch_path)],
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                creationflags=(subprocess.DETACHED_PROCESS
+                               | subprocess.CREATE_NEW_PROCESS_GROUP
+                               | 0x08000000),   # CREATE_NO_WINDOW
                 close_fds=True,
             )
             return True   # caller must quit so batch can overwrite the exe
@@ -4498,6 +4520,10 @@ class MainWindow(QMainWindow):
             re.compile(r"^QytCroRec_v[\d.]+\.exe\.partial$", re.I),
             re.compile(r"^QytCroRec_backup_v[\d.]+\.exe$", re.I),
             re.compile(r"^QytCroRec_new\.exe\.partial$",  re.I),
+            # Stale leftovers from failed batch swaps — safe to nuke on
+            # startup because if WE are running, no batch is mid-swap.
+            re.compile(r"^_qyt_update\.bat$",  re.I),
+            re.compile(r"^_qyt_update\.lock$", re.I),
         ]
         for f in install_dir.iterdir():
             if not f.is_file(): continue
