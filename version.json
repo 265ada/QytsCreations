@@ -1,4 +1,4 @@
 {
-  "version": "1.55",
-  "notes": "v1.55: Guard Macro Stop button now reads bold 'STOP' in Impact/Arial Black 900-weight on the orange gradient. Matches the REC button's broadcast typeface. Octagonal emoji removed."
+  "version": "1.56",
+  "notes": "v1.56: Fix UnboundLocalError crash on update (lock_path defined before batch script write). Guard Macro panel: status hint + View Recorded Events button shows full event table so you can verify what was captured."
 }

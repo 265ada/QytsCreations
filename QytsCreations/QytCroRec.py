@@ -18,7 +18,7 @@ Install (Serial HID):  pip install pyserial             + flash firmware
                        from ./hid_firmware/ onto a Pi Pico or Arduino
 """
 
-__version__ = "1.55"
+__version__ = "1.56"
 
 # ── AUTO-UPDATE CONFIGURATION ────────────────────────────────────────────────
 # Set these two URLs to enable auto-update.  See README at bottom of file.
@@ -2237,6 +2237,20 @@ class AutoUpdater:
             #   4. Launch new exe.  Verify it stays alive 4 s; if it died
             #      (broken DLL / Defender quarantine) → rollback from backup
             #      and relaunch the working old exe.
+            # Single-instance lock — refuse to spawn a second update batch if
+            # one's already running.  Defined HERE (before batch write) so the
+            # f-string below can embed the path.
+            lock_path = current_exe.with_name("_qyt_update.lock")
+            if lock_path.exists():
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                    if age < 120:   # less than 2 min old → another batch live
+                        return _fail("Update batch already running — wait for it to finish.")
+                    # stale lock — clear it
+                    lock_path.unlink()
+                except Exception: pass
+            try: lock_path.write_text(str(os.getpid()))
+            except Exception: pass
             batch_path.write_text(
                 "@echo off\r\n"
                 "setlocal EnableDelayedExpansion\r\n"
@@ -2286,21 +2300,6 @@ class AutoUpdater:
                 "(goto) 2>nul & del /f /q \"%~f0\"\r\n",
                 encoding="ascii", errors="replace"
             )
-            # Single-instance lock — refuse to spawn a second update batch if
-            # one's already running.  Without this, every Check Now click +
-            # every restart of the broken exe would Popen another cmd window,
-            # piling up runaway batches retrying the same broken swap.
-            lock_path = current_exe.with_name("_qyt_update.lock")
-            if lock_path.exists():
-                try:
-                    age = time.time() - lock_path.stat().st_mtime
-                    if age < 120:   # less than 2 min old → another batch live
-                        return _fail("Update batch already running — wait for it to finish.")
-                    # stale lock — clear it
-                    lock_path.unlink()
-                except Exception: pass
-            try: lock_path.write_text(str(os.getpid()))
-            except Exception: pass
             # CREATE_NO_WINDOW (0x08000000) hides the cmd console.  User
             # previously saw a flashing cmd prompt looping `ping 127.0.0.1`
             # forever when the broken exe failed every relaunch.  Now silent.
@@ -4923,9 +4922,18 @@ class MainWindow(QMainWindow):
         self._guard_macro_list.itemDoubleClicked.connect(self._guard_macro_rename)
         self._guard_macro_list.itemChanged.connect(self._guard_macro_renamed)
         lay.addWidget(self._guard_macro_list)
-        self._gm_status = QLabel("")
+        self._gm_status = QLabel("← Select a guard macro, then hit REC to record")
         self._gm_status.setStyleSheet("color:#7a7d99;font-size:10px;")
         lay.addWidget(self._gm_status)
+        btn_gm_view = QPushButton("📋 View Recorded Events")
+        btn_gm_view.setToolTip("See / verify what events are stored in the selected guard macro")
+        btn_gm_view.setStyleSheet(
+            "QPushButton{background:#313244;color:#cdd6f4;border:1px solid #45475a;"
+            "border-radius:5px;font-size:11px;padding:3px 8px;}"
+            "QPushButton:hover{background:#45475a;}"
+            "QPushButton:pressed{background:#1e1e2e;}")
+        btn_gm_view.clicked.connect(self._guard_macro_view_events)
+        lay.addWidget(btn_gm_view)
         self._refresh_guard_macro_list()
         return w
 
@@ -5784,6 +5792,45 @@ class MainWindow(QMainWindow):
         self._storage.save_guard_macros(self._guard_macros)
         self._refresh_guard_macro_list()
         self._recording_lane = None
+
+    def _guard_macro_view_events(self):
+        """Open a read-only dialog showing every recorded event in the selected guard macro."""
+        gm = self._selected_guard_macro()
+        if not gm:
+            self._gm_status.setText("Select a guard macro first."); return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Guard Macro Events — {gm.name}")
+        dlg.resize(620, 420)
+        lay = QVBoxLayout(dlg)
+        info = QLabel(
+            f"<b>{gm.name}</b>  ·  {len(gm.events)} events recorded<br>"
+            "<span style='color:#7a7d99;font-size:11px;'>"
+            "To re-record: select the macro in the list then press REC. "
+            "Recording starts fresh and overwrites these events.</span>")
+        info.setTextFormat(Qt.TextFormat.RichText)
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        tbl = QTableWidget(len(gm.events), 4)
+        tbl.setHorizontalHeaderLabels(["#", "Type", "Key / Button", "Time (s)"])
+        tbl.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        tbl.setStyleSheet("QTableWidget{background:#181825;color:#cdd6f4;gridline-color:#313244;}"
+                          "QHeaderView::section{background:#313244;color:#cdd6f4;padding:4px;}")
+        for row, ev in enumerate(gm.events):
+            etype = ev.get("type", "?")
+            ts    = ev.get("timestamp", 0.0)
+            key   = (ev.get("key") or ev.get("button") or
+                     ev.get("dx","") or "")
+            tbl.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+            tbl.setItem(row, 1, QTableWidgetItem(etype))
+            tbl.setItem(row, 2, QTableWidgetItem(str(key)))
+            tbl.setItem(row, 3, QTableWidgetItem(f"{ts:.3f}"))
+        lay.addWidget(tbl)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(dlg.accept)
+        lay.addWidget(bb)
+        dlg.exec()
 
     def _guard_macro_rename(self, item: QListWidgetItem):
         self._guard_macro_list.editItem(item)
